@@ -18,6 +18,7 @@
 | `mp-siem-max-bot-notification.py` | основной скрипт: опрос SIEM, обработка событий MAX |
 | `max_api.py` | клиент Bot API MAX (long polling, отправка/редактирование сообщений, ответы на кнопки) |
 | `settings.py` | настройки бота |
+| `check_settings.py` | проверка настроек и связи с MAX и SIEM перед первым запуском |
 | `db.py`, `db_querys.py` | работа с SQLite-базой бота |
 | `pretty_log.py` | логирование с хранением последних записей для команды `/debug` |
 | `mp-siem-max.service` | пример unit-файла systemd |
@@ -66,8 +67,14 @@
 
 ```
 pip install -r requirements.txt
-python3 mp-siem-max-bot-notification.py
+python3 check_settings.py                      # проверка настроек и связи
+python3 mp-siem-max-bot-notification.py        # запуск
 ```
+
+`check_settings.py` по очереди проверяет заполненность `settings.py`, токен MAX, авторизацию в SIEM и
+чтение инцидентов, а также показывает `chat_id` тех, кто уже писал боту - оттуда берется
+`max_admin_chat_id`. При каждой проблеме печатается подсказка, что именно поправить. Бота на время
+проверки лучше остановить.
 
 Скрипт одинаково работает как на Windows, так и на Unix-подобной системе. Нужен Python 3.7 и новее,
 из внешних зависимостей только `requests`.

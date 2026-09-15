@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+bot.db
+settings_local.py
+.venv/
+venv/

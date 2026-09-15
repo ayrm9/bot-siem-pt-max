@@ -1,0 +1,13 @@
+[Unit]
+Description=A script for send incidents from MaxPatrol SIEM to MAX messenger
+After=network.target
+
+[Service]
+WorkingDirectory=/указать путь к каталогу со скриптом/
+ExecStart=/указать путь к используемой версии питона/python3 mp-siem-max-bot-notification.py
+
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

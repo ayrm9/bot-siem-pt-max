@@ -4,3 +4,4 @@ bot.db
 settings_local.py
 .venv/
 venv/
+*.bak

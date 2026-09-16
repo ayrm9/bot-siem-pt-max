@@ -43,7 +43,7 @@
 
 Параметры MAX:
 
-- `max_api_url` - адрес Bot API MAX (по умолчанию `https://botapi.max.ru`)
+- `max_api_url` - адрес Bot API MAX (по умолчанию `https://platform-api2.max.ru`)
 - `max_bot_token` - токен бота MAX
 - `max_updates_timeout` - время ожидания новых событий в MAX (long polling, максимум 90 секунд)
 - `max_updates_limit` - сколько событий забирать из MAX за один запрос
@@ -56,12 +56,31 @@
 `client_secret` для авторизации скрипта в SIEM можно взять в конфигурации Core
 (*/var/lib/deployed-roles/mp10-application/core-##########/install.sh*).
 
-`max_bot_token` выдает [@masterbot](https://max.ru/masterbot) в мессенджере MAX: команда `/newbot`, затем имя и
-описание бота. Токен можно посмотреть и перевыпустить там же командой `/mybots`.
+`max_bot_token` берется в личном кабинете [business.max.ru](https://business.max.ru/) в настройках чат-бота
+(поле «Токен доступа», рядом есть кнопка копирования и кнопка перевыпуска). Второй способ - создать бота
+у [@masterbot](https://max.ru/masterbot) прямо в мессенджере: команда `/newbot`, затем `/mybots` для просмотра
+токена.
 
-Чтобы узнать `max_admin_chat_id`, напишите своему боту любое сообщение и откройте ссылку вида
-`https://botapi.max.ru/updates?access_token=ВАШ_ТОКЕН` - в событии `message_created` нужное значение лежит
-в `message.recipient.chat_id`. Тот же id бот выведет в лог при получении сообщения.
+Чтобы узнать `max_admin_chat_id`, напишите своему боту любое сообщение и запустите `check_settings.py` -
+он покажет chat_id всех, кто писал боту. Вручную то же самое:
+
+```
+curl -H "Authorization: ВАШ_ТОКЕН" "https://platform-api2.max.ru/updates?limit=100&timeout=3"
+```
+
+В событии `message_created` нужное значение лежит в `message.recipient.chat_id`. Тот же id бот выведет
+в лог при получении сообщения.
+
+### Авторизация в Bot API MAX
+
+Две особенности, на которых легко споткнуться:
+
+- токен передается в заголовке `Authorization` **без префикса `Bearer`**. С префиксом MAX считает токеном
+  всю строку целиком и отвечает `401 {"code":"verify.token","message":"Malformed access token"}`;
+- параметр `access_token` в query больше не поддерживается, ответ на него -
+  `401 {"message":"Query parameter access_token is deprecated, use Authorization header"}`.
+
+Домен API тоже переехал: `botapi.max.ru` -> `platform-api.max.ru` -> актуальный `platform-api2.max.ru`.
 
 ## Установка и запуск
 
@@ -182,7 +201,8 @@ python3 tests/fake_max.py 8765 &
 
 | | Telegram | MAX |
 | --- | --- | --- |
-| Адрес API | `https://api.telegram.org/bot<token>/<method>` | `https://botapi.max.ru/<method>?access_token=<token>` |
+| Адрес API | `https://api.telegram.org/bot<token>/<method>` | `https://platform-api2.max.ru/<method>` |
+| Авторизация | токен в пути URL | заголовок `Authorization: <токен>`, без `Bearer` |
 | Курсор событий | `offset` = `update_id` + 1 | `marker` из ответа `/updates` передается как есть |
 | Отправка | `sendMessage`, `chat_id` в теле | `POST /messages`, `chat_id` в query, разметка в поле `format` |
 | Клавиатура | отдельное поле `reply_markup` | вложение `attachments` с типом `inline_keyboard` |

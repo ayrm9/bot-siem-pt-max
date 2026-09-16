@@ -34,9 +34,10 @@ base_url = "https://siem.local"
 # # # # # # # # # # #
 
 # Адрес Bot API мессенджера MAX. В конце строки не должно быть символа /
-max_api_url = "https://botapi.max.ru"
+# Актуальный домен - platform-api2.max.ru (старые botapi.max.ru и platform-api.max.ru выводятся из работы)
+max_api_url = "https://platform-api2.max.ru"
 
-# Токен бота MAX (выдается ботом @masterbot)
+# Токен бота MAX (берется в business.max.ru в настройках чат-бота либо у бота @masterbot)
 max_bot_token = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 # Время в секундах на ожидание новых событий в MAX (long polling, максимум 90)

@@ -368,14 +368,22 @@ def main():
             lambda: [m for m in messages_to(max_state(), ADMIN)
                      if "Список заблокированных чатов: [999]" in (m["text"] or "")]) is not None)
 
-        # 10. Токен MAX проверяется через заголовок Authorization
+        # 10. Токен MAX проверяется через заголовок Authorization без префикса Bearer
         print("\n10. Авторизация в MAX", flush=True)
         try:
-            request = urllib.request.Request(MAX_URL + "/me", headers={"Authorization": "Bearer WRONG"})
+            request = urllib.request.Request(MAX_URL + "/me", headers={"Authorization": "WRONG"})
             urllib.request.urlopen(request, timeout=10)
             check("MAX отклоняет неверный токен", False, "эмулятор ответил 200")
         except urllib.error.HTTPError as error:
             check("MAX отклоняет неверный токен", error.code == 401, "код {0}".format(error.code))
+        try:
+            request = urllib.request.Request(MAX_URL + "/me",
+                                             headers={"Authorization": "Bearer " + MAX_TOKEN})
+            urllib.request.urlopen(request, timeout=10)
+            check("MAX отклоняет токен с префиксом Bearer", False, "эмулятор ответил 200")
+        except urllib.error.HTTPError as error:
+            check("MAX отклоняет токен с префиксом Bearer", error.code == 401,
+                  "код {0}".format(error.code))
         try:
             urllib.request.urlopen(MAX_URL + "/me?access_token=" + MAX_TOKEN, timeout=10)
             check("MAX отклоняет устаревший access_token в query", False, "эмулятор ответил 200")

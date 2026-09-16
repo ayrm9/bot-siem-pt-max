@@ -74,8 +74,8 @@ def check_placeholders():
 
 
 def _max_headers():
-    # access_token в query устарел, MAX требует токен в заголовке Authorization
-    return {"Authorization": "Bearer {0}".format(settings.max_bot_token)}
+    # MAX ждет токен в заголовке Authorization БЕЗ префикса Bearer
+    return {"Authorization": settings.max_bot_token}
 
 
 def check_max():

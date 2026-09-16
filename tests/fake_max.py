@@ -61,15 +61,19 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def _check_token(self, query):
-        # настоящий MAX больше не принимает access_token в query - только Bearer в заголовке
+        # настоящий MAX больше не принимает access_token в query
         if query.get("access_token"):
             self._reply(401, {"code": "verify.token",
                               "message": "Query parameter access_token is deprecated, "
                                          "use Authorization header"})
             return False
         auth = self.headers.get("Authorization") or ""
-        token = auth[len("Bearer "):] if auth.startswith("Bearer ") else None
-        if token != TOKEN:
+        # токен передается голым, без префикса Bearer: с префиксом MAX считает
+        # токеном всю строку целиком и отвечает "Malformed access token"
+        if auth.startswith("Bearer "):
+            self._reply(401, {"code": "verify.token", "message": "Malformed access token"})
+            return False
+        if auth != TOKEN:
             self._reply(401, {"code": "verify.token", "message": "Invalid access_token"})
             return False
         return True

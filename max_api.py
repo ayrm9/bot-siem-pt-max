@@ -39,8 +39,10 @@ def _params(extra=None):
 
 
 def _headers():
-    # access_token в query устарел, MAX требует токен в заголовке Authorization
-    return {"Authorization": "Bearer {0}".format(settings.max_bot_token)}
+    # MAX ждет токен в заголовке Authorization БЕЗ префикса Bearer.
+    # С префиксом сервер считает токеном всю строку и отвечает "Malformed access token".
+    # Параметр access_token в query больше не поддерживается.
+    return {"Authorization": settings.max_bot_token}
 
 
 def _request(method, api_path, params=None, json_body=None, timeout=10):

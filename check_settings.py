@@ -10,6 +10,7 @@
 Бот в это время должен быть остановлен, иначе он разберет события раньше.
 """
 
+import os
 import sys
 
 import requests
@@ -17,6 +18,22 @@ import requests
 import settings
 
 requests.packages.urllib3.disable_warnings()
+
+# Системные хранилища корневых сертификатов в разных дистрибутивах.
+# MAX выпускает сертификат российским УЦ (Минцифры): он обычно есть в системном
+# хранилище, но отсутствует в наборе certifi, которым по умолчанию пользуется requests.
+SYSTEM_CA_BUNDLES = (
+    "/etc/pki/tls/certs/ca-bundle.crt",        # RED OS, RHEL, CentOS, Fedora
+    "/etc/ssl/certs/ca-certificates.crt",      # Debian, Ubuntu, Astra Linux
+    "/etc/ssl/ca-bundle.pem",                  # openSUSE
+)
+
+
+def find_system_ca_bundle():
+    for path in SYSTEM_CA_BUNDLES:
+        if os.path.exists(path):
+            return path
+    return None
 
 PLACEHOLDERS = {
     "max_bot_token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -89,8 +106,15 @@ def check_max():
             verify=settings.max_verify_ssl,
         )
     except requests.exceptions.SSLError as ex:
-        fail("ошибка SSL при обращении к MAX: {0}".format(ex),
-             "проверьте max_api_url или временно поставьте max_verify_ssl = False")
+        bundle = find_system_ca_bundle()
+        if bundle and settings.max_verify_ssl is True:
+            hint = ("MAX использует сертификат российского УЦ, которого нет в наборе certifi. "
+                    "Пропишите в settings.py путь к системному хранилищу:\n"
+                    '          max_verify_ssl = "{0}"'.format(bundle))
+        else:
+            hint = ("проверьте max_api_url и наличие корневого сертификата УЦ Минцифры "
+                    "в системном хранилище")
+        fail("ошибка SSL при обращении к MAX: {0}".format(ex), hint)
         return None
     except requests.exceptions.ProxyError as ex:
         hint = "проверьте max_proxys в settings.py" if settings.max_proxys else \

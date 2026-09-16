@@ -49,7 +49,7 @@
 - `max_updates_limit` - сколько событий забирать из MAX за один запрос
 - `max_admin_chat_id` - id чата с администратором в MAX
 - `max_proxys` - словарь прокси для связи с MAX, пустой `{}` - без прокси
-- `max_verify_ssl` - проверять ли сертификат сервера MAX
+- `max_verify_ssl` - проверка сертификата MAX: `True`, `False` или путь к хранилищу сертификатов
 - `max_message_length` - максимальная длина текста сообщения (MAX обрезает длинные сообщения)
 - `ping_sticker_code` - код стикера для ответа на `/ping`; если пусто, бот отвечает текстом
 
@@ -81,6 +81,26 @@ curl -H "Authorization: ВАШ_ТОКЕН" "https://platform-api2.max.ru/updates
   `401 {"message":"Query parameter access_token is deprecated, use Authorization header"}`.
 
 Домен API тоже переехал: `botapi.max.ru` -> `platform-api.max.ru` -> актуальный `platform-api2.max.ru`.
+
+### Сертификат MAX
+
+`platform-api2.max.ru` использует сертификат российского УЦ (Минцифры). В системном хранилище он обычно
+есть (поэтому `curl` работает), но Python-библиотека `requests` по умолчанию берет сертификаты из набора
+`certifi`, где его нет, и падает с ошибкой:
+
+```
+SSLError: certificate verify failed: unable to get local issuer certificate
+```
+
+Лечится указанием системного хранилища в `settings.py` - проверку сертификата отключать не нужно:
+
+```python
+max_verify_ssl = "/etc/pki/tls/certs/ca-bundle.crt"     # RED OS, RHEL, CentOS, Fedora
+max_verify_ssl = "/etc/ssl/certs/ca-certificates.crt"   # Debian, Ubuntu, Astra Linux
+```
+
+Если сертификата нет и в системном хранилище, его нужно установить с
+[портала Госуслуг](https://www.gosuslugi.ru/crt).
 
 ## Установка и запуск
 

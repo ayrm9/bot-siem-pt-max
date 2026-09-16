@@ -121,7 +121,14 @@ python3 mp-siem-max-bot-notification.py        # запуск
 При первом запуске файл БД будет создан автоматически по пути, указанному в параметре `dbFileName`.
 
 Для работы под Linux рекомендуется запуск бота в качестве сервиса. Скопируйте `mp-siem-max.service`
-в `/etc/systemd/system/`, укажите в нем путь к каталогу со скриптом и к интерпретатору, затем:
+в `/etc/systemd/system/` и поправьте в нем три строки: `User`, `WorkingDirectory` и путь в `ExecStart`.
+
+Две вещи, которые важно не потерять при правке:
+
+- `User` должен совпадать с пользователем, от которого ставились зависимости через `pip3 install --user`,
+  иначе Python не найдет `requests`;
+- ключ `-u` в `ExecStart` отключает буферизацию вывода Python. Без него логи бота попадают в journald
+  с задержкой, кусками по 4 КБ, и служба выглядит «молчащей».
 
 ```
 systemctl daemon-reload
@@ -130,6 +137,17 @@ systemctl start mp-siem-max.service  # запуск сервиса
 systemctl status mp-siem-max.service # статус сервиса
 systemctl stop mp-siem-max.service   # остановка сервиса
 ```
+
+Логи службы читаются из journald:
+
+```
+journalctl -u mp-siem-max -f          # смотреть в реальном времени
+journalctl -u mp-siem-max --since -1h # за последний час
+```
+
+Бот подробно логирует каждый запрос к БД, поэтому журнал растет быстро. Если это мешает, ограничьте
+размер journald (`SystemMaxUse` в `/etc/systemd/journald.conf`) либо уменьшите `limit` у логгеров
+в `pretty_log.py`.
 
 ## Выдача доступа к оповещениям
 

@@ -1,10 +1,23 @@
 [Unit]
-Description=A script for send incidents from MaxPatrol SIEM to MAX messenger
-After=network.target
+Description=Отправка инцидентов MaxPatrol SIEM в мессенджер MAX
+# ждем именно поднятую сеть, иначе бот стартует раньше и падает на первом запросе
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-WorkingDirectory=/указать путь к каталогу со скриптом/
-ExecStart=/указать путь к используемой версии питона/python3 mp-siem-max-bot-notification.py
+Type=simple
+
+# Пользователь, от которого работает бот. Важно: если зависимости ставились
+# командой pip3 install --user, здесь должен быть тот же пользователь,
+# иначе Python не найдет библиотеку requests.
+User=siembot
+
+# Каталог со скриптами бота
+WorkingDirectory=/opt/mp-siem-max
+
+# Ключ -u отключает буферизацию вывода Python.
+# Без него логи бота попадают в journald с большой задержкой, кусками по 4 КБ.
+ExecStart=/usr/bin/python3 -u /opt/mp-siem-max/mp-siem-max-bot-notification.py
 
 Restart=always
 RestartSec=60

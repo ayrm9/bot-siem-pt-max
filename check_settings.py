@@ -73,12 +73,17 @@ def check_placeholders():
         fail("max_updates_timeout больше 90", "MAX не держит соединение дольше 90 секунд")
 
 
+def _max_headers():
+    # access_token в query устарел, MAX требует токен в заголовке Authorization
+    return {"Authorization": "Bearer {0}".format(settings.max_bot_token)}
+
+
 def check_max():
     section("2. Связь с MAX")
     try:
         response = requests.get(
             settings.max_api_url + "/me",
-            params={"access_token": settings.max_bot_token},
+            headers=_max_headers(),
             timeout=15,
             proxies=settings.max_proxys,
             verify=settings.max_verify_ssl,
@@ -117,7 +122,8 @@ def check_max_chats():
     try:
         response = requests.get(
             settings.max_api_url + "/updates",
-            params={"access_token": settings.max_bot_token, "timeout": 3, "limit": 100},
+            params={"timeout": 3, "limit": 100},
+            headers=_max_headers(),
             timeout=20,
             proxies=settings.max_proxys,
             verify=settings.max_verify_ssl,

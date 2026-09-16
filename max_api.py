@@ -32,10 +32,15 @@ def _url(api_path):
 
 
 def _params(extra=None):
-    params = {"access_token": settings.max_bot_token}
+    params = {}
     if extra:
         params.update({key: value for key, value in extra.items() if value is not None})
     return params
+
+
+def _headers():
+    # access_token в query устарел, MAX требует токен в заголовке Authorization
+    return {"Authorization": "Bearer {0}".format(settings.max_bot_token)}
 
 
 def _request(method, api_path, params=None, json_body=None, timeout=10):
@@ -45,6 +50,7 @@ def _request(method, api_path, params=None, json_body=None, timeout=10):
             method=method,
             url=_url(api_path),
             params=_params(params),
+            headers=_headers(),
             json=json_body,
             timeout=timeout,
             proxies=settings.max_proxys,

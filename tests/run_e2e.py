@@ -256,12 +256,21 @@ def main():
               find_message(max_state(), USER, "Новые инциденты") is not None)
         if incident_message:
             text = incident_message["text"]
-            check("в тексте опасность с эмодзи", "Опасность: Высокая 🔴" in text)
+            lines = text.splitlines()
+            check("заголовок - важность и имя инцидента", lines[0] == "🔴 Брутфорс учетной записи",
+                  lines[0])
+            check("вторая строка - ключ, важность, статус",
+                  lines[1] == "INC-E2E-1 · Высокая · Новый", lines[1])
             check("в тексте ссылка на инцидент", incident["id"] in text)
-            check("в тексте события инцидента", "Множественные неудачные попытки входа" in text,
-                  "событий в сообщении: {0}".format(text.count("Событие:")))
-            check("время сдвинуто в часовой пояс из настроек", "Время: " in text,
-                  [line for line in text.splitlines() if line.startswith("Время")][0])
+            check("ссылка в конце сообщения", lines[-1].startswith("http"), lines[-1])
+            check("в тексте события инцидента", "Множественные неудачные попытки входа" in text)
+            check("события идут списком без подписей Дата/Событие",
+                  "Дата:" not in text and "Событие:" not in text and text.count("\n• ") == 2)
+            check("одинаковые события схлопнуты со счетчиком", "×3" in text,
+                  [line for line in lines if "×" in line])
+            check("время сдвинуто в часовой пояс из настроек",
+                  any(line.startswith("Создан: ") for line in lines),
+                  [line for line in lines if line.startswith("Создан")])
             payloads = [b["payload"] for b in buttons_of(incident_message)]
             check("под новым инцидентом три кнопки",
                   payloads == ["check:{0}".format(incident["id"]),
@@ -295,8 +304,8 @@ def main():
                                   if e["message_id"] == incident_message["mid"]] or None))
         check("сообщение об инциденте обновлено", edit is not None)
         if edit:
-            check("в обновленном тексте новый статус", "Статус: Approved" in edit[-1]["text"],
-                  [line for line in edit[-1]["text"].splitlines() if line.startswith("Статус")])
+            check("в обновленном тексте новый статус", "· Подтвержден" in edit[-1]["text"],
+                  [line for line in edit[-1]["text"].splitlines() if "·" in line])
             check("в сообщении видно, кто подтвердил", "▶️ Подтвердил: @ivan" in edit[-1]["text"],
                   [line for line in edit[-1]["text"].splitlines() if "Подтвердил" in line])
             payloads = [b["payload"] for b in buttons_of(edit[-1])]
@@ -315,7 +324,7 @@ def main():
                 check("второй чат видит, кто подтвердил",
                       "▶️ Подтвердил: @ivan" in edit2[-1]["text"],
                       [line for line in edit2[-1]["text"].splitlines() if "Подтвердил" in line])
-                check("второй чат видит новый статус", "Статус: Approved" in edit2[-1]["text"])
+                check("второй чат видит новый статус", "· Подтвержден" in edit2[-1]["text"])
                 # у остальных дежурных кнопки действий должны пропасть,
                 # чтобы никто не пытался подтвердить или закрыть повторно
                 payloads2 = [b["payload"] for b in buttons_of(edit2[-1])]
@@ -389,7 +398,7 @@ def main():
                             lambda: find_message(max_state(), USER, "INC-E2E-2"))
         check("второй инцидент доставлен", message2 is not None)
         if message2:
-            check("средняя опасность отмечена оранжевым", "Опасность: Средняя 🟠" in message2["text"])
+            check("средняя опасность отмечена оранжевым", message2["text"].startswith("🟠 "), message2["text"].splitlines()[0])
             inject(callback_update("close:{0}".format(incident2["id"]), USER, USER,
                                    message2["mid"], username="ivan", first_name="Иван"))
             closed = wait_for("закрытие инцидента",

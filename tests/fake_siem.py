@@ -74,7 +74,13 @@ def add_incident(key=None, name=None, severity="High", inc_type="Attack",
     }
     with LOCK:
         STATE["incidents"].append(incident)
+        # SIEM часто присылает один и тот же текст несколько раз подряд,
+        # поэтому в наборе по умолчанию есть повторы: бот должен их схлопнуть
         STATE["events"][incident_id] = events if events is not None else [
+            {"date": datetime.utcnow().isoformat() + "0Z",
+             "description": "Множественные неудачные попытки входа с 10.0.0.5"},
+            {"date": datetime.utcnow().isoformat() + "0Z",
+             "description": "Множественные неудачные попытки входа с 10.0.0.5"},
             {"date": datetime.utcnow().isoformat() + "0Z",
              "description": "Множественные неудачные попытки входа с 10.0.0.5"},
             {"date": datetime.utcnow().isoformat() + "0Z",

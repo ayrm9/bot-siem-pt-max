@@ -24,6 +24,7 @@ requests.adapters.DEFAULT_RETRIES = 3
 # файл с настройками правится руками и при git pull не обновляется.
 SIEM_TIMEOUT = getattr(settings, "siem_timeout", 60)
 INCIDENT_HISTORY_DAYS = getattr(settings, "incident_messages_keep_days", 30)
+MAX_EVENT_LENGTH = getattr(settings, "max_event_length", 400)
 
 # Служебные переменные
 bot_db_connect, bot_db_cursor = db.connection_init()  # инициализация подключения к БД бота
@@ -232,55 +233,104 @@ def siem_set_incident_status(incident_id, status, measures=None, message=None):
     return response.status_code
 
 
-# Превращение инцидента в строку
+# Цвет и название важности инцидента
+SEVERITY_VIEW = {
+    "High": ("🔴", "Высокая"),
+    "Medium": ("🟠", "Средняя"),
+    "Low": ("🟡", "Низкая"),
+}
+
+# Статусы инцидента на русском: в веб-интерфейсе SIEM они тоже на русском
+STATUS_VIEW = {
+    "New": "Новый",
+    "Approved": "Подтвержден",
+    "InProgress": "В работе",
+    "Resolved": "Решен",
+    "Closed": "Закрыт",
+    "Discarded": "Отклонен",
+}
+
+
+# Разбор времени из SIEM: оно хранится по GMT+0, приводим к часовому поясу из настроек.
+# Дробная часть обрезается до 6 знаков - столько понимает datetime.
+def siem_time(value):
+    try:
+        return datetime.fromisoformat(str(value)[:23]) + settings.time_zone
+    except (TypeError, ValueError):
+        return None
+
+
+# Одинаковые события схлопываем в одну строку со счетчиком:
+# SIEM часто присылает один и тот же текст по несколько раз
+def collapse_events(events):
+    """Вернуть [[время, описание, сколько раз], ...] в порядке появления."""
+    collapsed = []
+    positions = {}
+    for event in events:
+        description = str(event.get("description") or "").strip()
+        if not description:
+            continue
+        if description in positions:
+            collapsed[positions[description]][2] += 1
+            continue
+        positions[description] = len(collapsed)
+        collapsed.append([event.get("date"), description, 1])
+    return collapsed
+
+
+# Блок событий инцидента
+def events_block(incident_id, incident_day):
+    events = siem_get_events_by_incident_id(incident_id=incident_id)
+    if not events:
+        return "\n\nСобытий нет"
+
+    collapsed = collapse_events(events)
+    lines = []
+    shown = 0
+    for event_date, description, repeats in collapsed[:settings.max_events_count]:
+        moment = siem_time(event_date)
+        if moment is None:
+            stamp = "??:??:??"
+        elif incident_day and moment.date() == incident_day:
+            # события обычно в тот же день, что и инцидент - дату не повторяем
+            stamp = moment.strftime("%H:%M:%S")
+        else:
+            stamp = moment.strftime("%d.%m %H:%M:%S")
+        if len(description) > MAX_EVENT_LENGTH:
+            description = description[:MAX_EVENT_LENGTH].rstrip() + "…"
+        lines.append("• {0}  {1}{2}".format(stamp, description,
+                                            "  ×{0}".format(repeats) if repeats > 1 else ""))
+        shown += repeats
+
+    block = "\n\nСобытия ({0}):\n".format(len(events)) + "\n".join(lines)
+    if shown < len(events):
+        block += "\n…и еще {0}".format(len(events) - shown)
+    return block
+
+
+# Превращение инцидента в текст сообщения
 def incident_to_string(incident):
     try:
-        # время обрезается до формата, который удается распарсить, добавляется поправка на наш часовой пояс
-        inc_date = (datetime.fromisoformat(incident['created'][:23]) + settings.time_zone).strftime("%Y.%m.%d %H:%M:%S")
         inc_id = incident['id']
-        inc_key = incident['key']
-        inc_severity = incident['severity']
-        inc_type = incident['type']
-        inc_name = incident['name']
-        inc_status = incident['status']
-        inc_link = f'{settings.base_url}/#/incident/incidents/view/{inc_id}'
+        created = siem_time(incident.get('created'))
+        emoji, severity = SEVERITY_VIEW.get(incident.get('severity'),
+                                            ("⚪", incident.get('severity') or "неизвестна"))
+        status = STATUS_VIEW.get(incident.get('status'), incident.get('status'))
 
-        # к обозначению опасности добавляю цветной эмодзи для наглядности
-        if inc_severity == "High":
-            inc_severity = "Высокая 🔴"
-        elif inc_severity == "Medium":
-            inc_severity = "Средняя 🟠"
-        elif inc_severity == "Low":
-            inc_severity = "Низкая 🟡"
+        # Заголовок: сначала то, ради чего сообщение читают - что случилось и насколько важно.
+        # Дальше служебные поля, в конце ссылка, чтобы длинный URL не разрывал текст.
+        header = "{0} {1}\n{2} · {3} · {4}".format(emoji, incident.get('name'), incident.get('key'),
+                                                   severity, status)
+        details = "\nТип: {0}".format(incident.get('type'))
+        if created:
+            details += "\nСоздан: {0}".format(created.strftime("%d.%m.%Y %H:%M:%S"))
 
-        # получение событий по инциденту
-        events = siem_get_events_by_incident_id(incident_id=inc_id)
-        events_str = "\nИнцидент без событий"
-        # если есть события
-        if len(events) > 0:
-            events_str = "\nСобытия по инциденту: \n\n"
-            ev_number = 0
-            # парсинг событий в строку events_str
-            for ev in events:
-                ev_number += 1
-                ev_date = (datetime.fromisoformat(ev['date'][:23]) + settings.time_zone).strftime("%Y.%m.%d %H:%M:%S")
-                ev_description = ev['description']
-                ev_str = "Дата: {0}\nСобытие: {1}".format(ev_date, ev_description)
-                events_str = events_str + ev_str + "\n\n"
-                # если обработали нужное число событий - остановиться
-                if ev_number == settings.max_events_count:
-                    events_str = events_str + "И еще {0} событий.".format(len(events) - ev_number)
-                    break
-        result_string = f"{inc_key}\n" \
-                        f"Время: {inc_date}\n" \
-                        f"Опасность: {inc_severity}\n" \
-                        f"Тип: {inc_type}\n" \
-                        f"Имя: {inc_name}\n" \
-                        f"Статус: {inc_status}\n" \
-                        f"Ссылка на инцидент: {inc_link}" \
-                        f"{incident_actions_block(inc_id)}" \
-                        f"\n{events_str}"
-        return result_string
+        return "{header}{details}{actions}{events}\n\n{link}".format(
+            header=header,
+            details=details,
+            actions=incident_actions_block(inc_id),
+            events=events_block(inc_id, created.date() if created else None),
+            link="{0}/#/incident/incidents/view/{1}".format(settings.base_url, inc_id))
     except Exception as ex_parse:
         log("Ошибка при парсинге инцидента: " + str(ex_parse))
         return "Не удалось распарсить инцидент"

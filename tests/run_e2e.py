@@ -316,6 +316,14 @@ def main():
                       "▶️ Подтвердил: @ivan" in edit2[-1]["text"],
                       [line for line in edit2[-1]["text"].splitlines() if "Подтвердил" in line])
                 check("второй чат видит новый статус", "Статус: Approved" in edit2[-1]["text"])
+                # у остальных дежурных кнопки действий должны пропасть,
+                # чтобы никто не пытался подтвердить или закрыть повторно
+                payloads2 = [b["payload"] for b in buttons_of(edit2[-1])]
+                check("во втором чате кнопки Подтвердить и Закрыть исчезли",
+                      payloads2 == ["check:{0}".format(incident["id"])], str(payloads2))
+                texts2 = [b["text"] for b in buttons_of(edit2[-1])]
+                check("во втором чате осталась только кнопка обновления",
+                      all("Подтвердить" not in t and "Закрыть" not in t for t in texts2), str(texts2))
 
         # 6. Команды
         print("\n6. Команды бота", flush=True)

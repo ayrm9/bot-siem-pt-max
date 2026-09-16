@@ -257,8 +257,12 @@ def main():
         if incident_message:
             text = incident_message["text"]
             lines = text.splitlines()
-            check("заголовок - важность и имя инцидента", lines[0] == "🔴 Брутфорс учетной записи",
-                  lines[0])
+            check("заголовок - важность и имя инцидента жирным",
+                  lines[0] == "🔴 <b>Брутфорс учетной записи</b>", lines[0])
+            check("сообщение отправлено в режиме html", incident_message["format"] == "html",
+                  str(incident_message["format"]))
+            check("подзаголовок событий выделен жирным", "<b>События (4):</b>" in text,
+                  [line for line in lines if "События" in line])
             check("вторая строка - ключ, важность, статус",
                   lines[1] == "INC-E2E-1 · Высокая · Новый", lines[1])
             check("в тексте ссылка на инцидент", incident["id"] in text)
@@ -281,6 +285,33 @@ def main():
               and len([m for m in messages_to(max_state(), USER) if "INC-E2E-1" in (m["text"] or "")]) == 1,
               "доставок: {0}".format(len([m for m in messages_to(max_state(), USER)
                                           if "INC-E2E-1" in (m["text"] or "")])))
+
+        # 4б. Опасные для html символы в данных из SIEM не должны ломать разметку
+        print("\n4б. Экранирование спецсимволов в тексте из SIEM", flush=True)
+        tricky = post(SIEM_URL + "/_add_incident", {
+            "key": "INC-E2E-HTML",
+            "name": "Тест <b>инъекции</b> & спецсимволов",
+            "events": [{"date": "2026-09-16T08:00:00.000000Z",
+                        "description": "Правило <script>alert(1)</script> сработало "
+                                       "для a_b_c & <тега>"}],
+        })
+        tricky_message = wait_for("инцидент со спецсимволами",
+                                  lambda: find_message(max_state(), USER, "INC-E2E-HTML"))
+        check("инцидент со спецсимволами доставлен", tricky_message is not None)
+        if tricky_message:
+            tricky_text = tricky_message["text"]
+            check("угловые скобки из имени экранированы",
+                  "&lt;b&gt;инъекции&lt;/b&gt;" in tricky_text,
+                  tricky_text.splitlines()[0])
+            check("амперсанд экранирован", "&amp; спецсимволов" in tricky_text)
+            check("тег из описания события экранирован",
+                  "&lt;script&gt;alert(1)&lt;/script&gt;" in tricky_text)
+            check("подчеркивания в описании не тронуты", "a_b_c" in tricky_text)
+            # единственные настоящие теги - те, что бот поставил сам
+            check("в тексте нет посторонних html-тегов",
+                  tricky_text.count("<b>") == tricky_text.count("</b>")
+                  and "<script" not in tricky_text,
+                  "открывающих <b>: {0}".format(tricky_text.count("<b>")))
 
         # 5. Пользователь подтверждает инцидент кнопкой
         print("\n5. Пользователь нажал «Подтвердить»", flush=True)
@@ -370,7 +401,12 @@ def main():
             "список чатов", lambda: find_message(max_state(), ADMIN, "Список чатов")) is not None)
         inject(message_update("/help", ADMIN, ADMIN, first_name="Админ"))
         check("/help отвечает администратору", wait_for(
-            "справка", lambda: find_message(max_state(), ADMIN, "/debug - получить последние логи")) is not None)
+            "справка",
+            lambda: find_message(max_state(), ADMIN, "<b>/debug</b>")) is not None)
+        check("в справке команды выделены жирным", wait_for(
+            "справка с разметкой",
+            lambda: [m for m in messages_to(max_state(), ADMIN)
+                     if "<b>Команды бота</b>" in (m["text"] or "") and m["format"] == "html"]) is not None)
         inject(message_update("/debug", ADMIN, ADMIN, first_name="Админ"))
         check("/debug показывает состояние", wait_for(
             "debug", lambda: find_message(max_state(), ADMIN, "last_marker =")) is not None)
@@ -398,7 +434,8 @@ def main():
                             lambda: find_message(max_state(), USER, "INC-E2E-2"))
         check("второй инцидент доставлен", message2 is not None)
         if message2:
-            check("средняя опасность отмечена оранжевым", message2["text"].startswith("🟠 "), message2["text"].splitlines()[0])
+            check("средняя опасность отмечена оранжевым", message2["text"].startswith("🟠 <b>"),
+                  message2["text"].splitlines()[0])
             inject(callback_update("close:{0}".format(incident2["id"]), USER, USER,
                                    message2["mid"], username="ivan", first_name="Иван"))
             closed = wait_for("закрытие инцидента",

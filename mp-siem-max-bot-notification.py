@@ -26,6 +26,11 @@ SIEM_TIMEOUT = getattr(settings, "siem_timeout", 60)
 INCIDENT_HISTORY_DAYS = getattr(settings, "incident_messages_keep_days", 30)
 MAX_EVENT_LENGTH = getattr(settings, "max_event_length", 400)
 
+# Режим разметки MAX. html выбран вместо markdown потому, что экранирование в нем
+# однозначное: достаточно заменить &, < и >. В описаниях событий SIEM часто
+# встречаются _ и *, которые markdown принял бы за разметку.
+PARSE_MODE = "html"
+
 # Служебные переменные
 bot_db_connect, bot_db_cursor = db.connection_init()  # инициализация подключения к БД бота
 bearer_token = None  # хранит полученный токен для связи с SIEM
@@ -251,6 +256,14 @@ STATUS_VIEW = {
 }
 
 
+# Экранирование текста из SIEM и MAX для режима html.
+# Без него угловые скобки в описании события или в имени пользователя
+# будут приняты за теги и сообщение отобразится криво либо будет отклонено.
+def html_escape(value):
+    return (str(value if value is not None else "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
 # Разбор времени из SIEM: оно хранится по GMT+0, приводим к часовому поясу из настроек.
 # Дробная часть обрезается до 6 знаков - столько понимает datetime.
 def siem_time(value):
@@ -278,16 +291,18 @@ def collapse_events(events):
     return collapsed
 
 
-# Блок событий инцидента
-def events_block(incident_id, incident_day):
-    events = siem_get_events_by_incident_id(incident_id=incident_id)
+# Блок событий инцидента. max_items ограничивает число строк:
+# им же подрезаем сообщение, если оно не влезает в лимит MAX
+def events_block(events, incident_day, max_items):
     if not events:
         return "\n\nСобытий нет"
+    if max_items < 1:
+        return "\n\nСобытий: {0} (не поместились в сообщение)".format(len(events))
 
     collapsed = collapse_events(events)
     lines = []
     shown = 0
-    for event_date, description, repeats in collapsed[:settings.max_events_count]:
+    for event_date, description, repeats in collapsed[:max_items]:
         moment = siem_time(event_date)
         if moment is None:
             stamp = "??:??:??"
@@ -298,11 +313,11 @@ def events_block(incident_id, incident_day):
             stamp = moment.strftime("%d.%m %H:%M:%S")
         if len(description) > MAX_EVENT_LENGTH:
             description = description[:MAX_EVENT_LENGTH].rstrip() + "…"
-        lines.append("• {0}  {1}{2}".format(stamp, description,
+        lines.append("• {0}  {1}{2}".format(stamp, html_escape(description),
                                             "  ×{0}".format(repeats) if repeats > 1 else ""))
         shown += repeats
 
-    block = "\n\nСобытия ({0}):\n".format(len(events)) + "\n".join(lines)
+    block = "\n\n<b>События ({0}):</b>\n".format(len(events)) + "\n".join(lines)
     if shown < len(events):
         block += "\n…и еще {0}".format(len(events) - shown)
     return block
@@ -319,18 +334,28 @@ def incident_to_string(incident):
 
         # Заголовок: сначала то, ради чего сообщение читают - что случилось и насколько важно.
         # Дальше служебные поля, в конце ссылка, чтобы длинный URL не разрывал текст.
-        header = "{0} {1}\n{2} · {3} · {4}".format(emoji, incident.get('name'), incident.get('key'),
-                                                   severity, status)
-        details = "\nТип: {0}".format(incident.get('type'))
+        header = "{0} <b>{1}</b>\n{2} · {3} · {4}".format(
+            emoji, html_escape(incident.get('name')), html_escape(incident.get('key')),
+            severity, html_escape(status))
+        details = "\nТип: {0}".format(html_escape(incident.get('type')))
         if created:
             details += "\nСоздан: {0}".format(created.strftime("%d.%m.%Y %H:%M:%S"))
 
-        return "{header}{details}{actions}{events}\n\n{link}".format(
-            header=header,
-            details=details,
-            actions=incident_actions_block(inc_id),
-            events=events_block(inc_id, created.date() if created else None),
-            link="{0}/#/incident/incidents/view/{1}".format(settings.base_url, inc_id))
+        events = siem_get_events_by_incident_id(incident_id=inc_id)
+        incident_day = created.date() if created else None
+        actions = incident_actions_block(inc_id)
+        link = "{0}/#/incident/incidents/view/{1}".format(settings.base_url, inc_id)
+
+        # Сообщение с html-разметкой нельзя резать по символам: обрезка посреди тега
+        # ломает разметку и MAX отклоняет сообщение. Поэтому при переполнении
+        # выбрасываем события целыми строками, пока текст не влезет в лимит.
+        for max_items in range(settings.max_events_count, -1, -1):
+            text = "{header}{details}{actions}{events}\n\n{link}".format(
+                header=header, details=details, actions=actions,
+                events=events_block(events, incident_day, max_items), link=link)
+            if len(text) <= settings.max_message_length:
+                return text
+        return text
     except Exception as ex_parse:
         log("Ошибка при парсинге инцидента: " + str(ex_parse))
         return "Не удалось распарсить инцидент"
@@ -341,7 +366,8 @@ def incident_actions_block(incident_id):
     rows = db.select_with_values(bot_db_cursor, db_querys.incident_action_get, str(incident_id))
     if not rows:
         return ""
-    return "\n\nДействия через бота:\n" + "\n".join(row[0] for row in rows)
+    # в записи попадает имя пользователя из MAX, поэтому экранируем при выводе
+    return "\n\n<b>Действия через бота:</b>\n" + "\n".join(html_escape(row[0]) for row in rows)
 
 
 # Запомнить действие пользователя над инцидентом
@@ -477,7 +503,8 @@ def refresh_incident_messages(incident_id, extra_message_id=None):
         return False
 
     for message_id in message_ids:
-        max_api.edit_message(message_id=message_id, msg=text, attachments=keyboard)
+        max_api.edit_message(message_id=message_id, msg=text, attachments=keyboard,
+                             parse_mode=PARSE_MODE)
     log("Инцидент {0}: обновлено сообщений - {1}".format(incident_id, len(message_ids)))
     return True
 
@@ -572,20 +599,18 @@ def user_to_string(user):
 
 # Текст справки для администратора
 def help_message():
-    return "/ping - проверка работоспособности бота\n" \
-           "`/accept[id]` - вручную разрешить отправку оповещений об " \
-           "инцидентах в чат по id (например `/accept 123456789`)\n" \
-           "/accepted - отобразить список всех чатов, куда отправляются " \
-           "оповещения об инцидентах\n" \
-           "`/deny[id]` - перестать отправлять оповещения об инцидентах в " \
-           "чат по id (например `/deny 123456789`)\n" \
-           "`/ban[id]` - заблокировать чат по id: перестать обрабатывать " \
-           "любые события с чатом, не оповещать администратора о нем " \
-           "(например `/ban 123456789`)\n" \
-           "`/unban[id]` - убрать чат из списка заблокированных " \
-           "(например `/unban 123456789`)\n" \
-           "/banned - отобразить список заблокированных чатов\n" \
-           "/debug - получить последние логи\n"
+    return "<b>Команды бота</b>\n\n" \
+           "<b>/ping</b> - проверка работоспособности бота\n" \
+           "<b>/accepted</b> - список чатов, куда отправляются оповещения\n" \
+           "<b>/banned</b> - список заблокированных чатов\n\n" \
+           "<b>Только для администратора:</b>\n" \
+           "<b>/accept id</b> - разрешить отправку оповещений в чат\n" \
+           "<b>/deny id</b> - перестать отправлять оповещения в чат\n" \
+           "<b>/ban id</b> - заблокировать чат: не обрабатывать его события " \
+           "и не оповещать о нем администратора\n" \
+           "<b>/unban id</b> - убрать чат из списка заблокированных\n" \
+           "<b>/debug</b> - текущее состояние и последние логи\n\n" \
+           "id можно писать слитно с командой: /accept123456789"
 
 
 # Обработка текстовых сообщений боту
@@ -673,7 +698,7 @@ def handle_message(message):
                 max_api.send_message(msg=reason)
     elif command == "/help":
         if is_admin:
-            max_api.send_message(msg=help_message(), parse_mode="markdown")
+            max_api.send_message(msg=help_message(), parse_mode=PARSE_MODE)
     elif command == "/ping":
         if chat_id in allowed_chats_ids:
             if settings.ping_sticker_code:
@@ -837,13 +862,15 @@ def check_new_chats():
             new_chat_id = new_chat[1]
             # в MAX у групповых чатов id положительный, поэтому тип берем из события
             new_chat_type = "групповой чат" if new_chat[2] == "chat" else "чат с пользователем"
-            new_chat_message = f"*Обнаружен новый {new_chat_type} {new_chat_name} (id {new_chat_id}).* \n" \
+            new_chat_message = f"<b>Обнаружен новый {new_chat_type} " \
+                               f"{html_escape(new_chat_name)} (id {new_chat_id})</b>\n" \
                                f"Разрешить отправку оповещений об инцидентах в этот чат?\n" \
                                f"✅ Разрешить - отправлять оповещения об инцидентах в этот чат.\n" \
                                f"⏹ Проигнорировать - не отправлять оповещения об инцидентах в этот чат.\n" \
                                f"⛔️ Заблокировать - больше не получать запросы на доступ этого чата."
             new_chat_keyboard = generate_chat_keyboard(chat_id=new_chat_id)
-            max_api.send_message(msg=new_chat_message, attachments=new_chat_keyboard, parse_mode="markdown")
+            max_api.send_message(msg=new_chat_message, attachments=new_chat_keyboard,
+                                 parse_mode=PARSE_MODE)
     log("... обработка закончена.")
 
 
@@ -917,7 +944,8 @@ if __name__ == "__main__":
                                     # чтобы остановка бота в этот момент не привела к дублю
                                     time.sleep(0.4)
                                 sent = max_api.send_message(msg=incident_text, ids=[chat_id],
-                                                            attachments=keyboard)
+                                                            attachments=keyboard,
+                                                            parse_mode=PARSE_MODE)
                                 if sent.get(chat_id):
                                     remember_incident_message(inc["id"], chat_id, sent[chat_id])
                         # чтобы получить в следующий раз только новые инциденты, в переменную last_incident_time

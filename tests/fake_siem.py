@@ -236,6 +236,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             incident = self._find(match.group(1))
             if incident is None:
                 return self._reply(404, {"error": "not found"})
+            if incident["status"] == body.get("id"):
+                # настоящий SIEM не дает перевести инцидент в статус, который уже установлен
+                print("[siem:80] отказ: инцидент {0} уже в статусе {1}".format(
+                    incident["key"], incident["status"]), flush=True)
+                return self._reply(400, {"error": "invalid transition",
+                                         "status": incident["status"]})
             with LOCK:
                 incident["status"] = body.get("id")
                 STATE["transitions"].append({

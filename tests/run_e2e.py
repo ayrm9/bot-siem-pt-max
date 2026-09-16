@@ -325,6 +325,32 @@ def main():
                 check("во втором чате осталась только кнопка обновления",
                       all("Подтвердить" not in t and "Закрыть" not in t for t in texts2), str(texts2))
 
+        # 5б. Второй дежурный нажимает кнопку по уже подтвержденному инциденту.
+        # Так бывает, если он успел нажать до того, как у него перерисовалось сообщение.
+        print("\n5б. Повторное нажатие по уже подтвержденному инциденту", flush=True)
+        transitions_before = len(siem_state()["transitions"])
+        inject(callback_update("apprv:{0}".format(incident["id"]), USER2, USER2,
+                               message_user2["mid"] if message_user2 else incident_message["mid"],
+                               username="petr", first_name="Петр"))
+        late = wait_for("ответ на повторное нажатие",
+                        lambda: ([a for a in max_state()["answers"]
+                                  if (a["notification"] or "").startswith("Инцидент уже")] or None))
+        check("бот объясняет, что инцидент уже подтвержден", late is not None,
+              late[-1]["notification"] if late else "")
+        if late:
+            check("в ответе указан тот, кто нажал первым", "@ivan" in late[-1]["notification"],
+                  late[-1]["notification"])
+        check("повторный переход в SIEM не записан",
+              len(siem_state()["transitions"]) == transitions_before,
+              "переходов было {0}, стало {1}".format(transitions_before,
+                                                     len(siem_state()["transitions"])))
+        check("бот не приписал второе действие в историю", wait_for(
+            "история действий",
+            lambda: ([e for e in max_state()["edits"]
+                      if e["message_id"] == incident_message["mid"]] or None)) is not None
+              and [e for e in max_state()["edits"]
+                   if e["message_id"] == incident_message["mid"]][-1]["text"].count("Подтвердил") == 1)
+
         # 6. Команды
         print("\n6. Команды бота", flush=True)
         inject(message_update("/ping", USER, USER, username="ivan"))

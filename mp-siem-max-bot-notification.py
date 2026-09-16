@@ -303,6 +303,16 @@ def remember_incident_action(incident_id, text):
         log("Не удалось сохранить действие по инциденту {0}: {1}".format(incident_id, ex_action))
 
 
+# Последнее действие по инциденту без эмодзи и глагола: "@ivan (777), 16.09.2026 15:20".
+# Нужно, чтобы подсказать нажавшему, кто его опередил.
+def last_incident_actor(incident_id):
+    rows = db.select_with_values(bot_db_cursor, db_querys.incident_action_get, str(incident_id))
+    if not rows:
+        return None
+    _, separator, actor = rows[-1][0].partition(": ")
+    return actor if separator else None
+
+
 # Запомнить, в какой чат и каким сообщением ушел инцидент
 def remember_incident_message(incident_id, chat_id, message_id):
     try:
@@ -338,6 +348,59 @@ def cleanup_incident_history():
         log("История инцидентов старше {0} дней очищена".format(INCIDENT_HISTORY_DAYS))
     except Exception as ex_cleanup:
         log("Не удалось очистить историю инцидентов: {0}".format(ex_cleanup))
+
+
+# Как называется статус в сообщениях пользователю:
+# статус в SIEM -> (эмодзи, "подтвердил", "подтвержден", "подтвердить")
+STATUS_WORDS = {
+    "Approved": ("▶️", "Подтвердил", "подтвержден", "подтвердить"),
+    "Closed": ("⏹", "Закрыл", "закрыт", "закрыть"),
+}
+
+
+# Сменить статус инцидента по нажатию кнопки и ответить нажавшему.
+# Возвращает True, если сообщения об инциденте нужно обновить.
+def apply_incident_transition(callback_id, incident_id, wanted_status, who, when):
+    emoji, verb_past, verb_done, verb_do = STATUS_WORDS[wanted_status]
+    log("Попытка перевести инцидент {0} в статус {1} пользователем {2}".format(
+        incident_id, wanted_status, who))
+
+    result = siem_set_incident_status(incident_id=incident_id,
+                                      status=wanted_status,
+                                      measures="Инцидент {0} через бот MAX.".format(verb_done),
+                                      message="Инцидент {0} пользователем {1} через бот MAX.".format(
+                                          verb_done, who))
+    if result == 204:
+        log("Инцидент {0} {1}".format(incident_id, verb_done))
+        remember_incident_action(incident_id, "{0} {1}: {2}, {3}".format(emoji, verb_past, who, when))
+        max_api.answer_callback(callback_id=callback_id,
+                                notification="Инцидент {0}".format(verb_done))
+        return True
+
+    # SIEM отказал - выясняем причину по фактическому статусу инцидента,
+    # а не по тексту ошибки: он различается между версиями SIEM
+    log("SIEM отказал в смене статуса инцидента {0}, код {1}".format(incident_id, result))
+    incident = siem_get_incident_by_id(incident_id=incident_id)
+    if not isinstance(incident, dict):
+        max_api.answer_callback(callback_id=callback_id,
+                                notification="Нет связи с SIEM, попробуйте позже")
+        return False
+
+    current_status = incident.get("status")
+    if current_status == wanted_status:
+        # кто-то из дежурных нажал кнопку на пару секунд раньше
+        notification = "Инцидент уже {0}".format(verb_done)
+        actor = last_incident_actor(incident_id)
+        if actor:
+            notification += ": {0}".format(actor)
+        log("Инцидент {0} уже был {1} ранее".format(incident_id, verb_done))
+        max_api.answer_callback(callback_id=callback_id, notification=notification)
+        return True
+
+    max_api.answer_callback(
+        callback_id=callback_id,
+        notification="Не удалось {0}. Статус инцидента в SIEM: {1}".format(verb_do, current_status))
+    return True
 
 
 # Обновить сообщение об инциденте во всех чатах, куда он уходил
@@ -602,44 +665,12 @@ def handle_callback(update):
         # подпись действия видна всем получателям инцидента, поэтому пишем и имя, и id
         who = "{username} ({userid})".format(username=callback_username, userid=callback_user_id)
         when = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-        if action == "apprv":
-            # подтвердить инцидент
-            log("Попытка подтвердить инцидент {inc} пользователем {user}".format(inc=target,
-                                                                                user=callback_user_id))
-            measures_text = "Инцидент подтвержден через бот MAX."
-            message_text = "Инцидент подтвержден пользователем {0} через бот MAX.".format(who)
-            result = siem_set_incident_status(incident_id=target,
-                                             status="Approved",
-                                             measures=measures_text,
-                                             message=message_text)
-            if result == 204:
-                log("Инцидент подтвержден")
-                remember_incident_action(target, "▶️ Подтвердил: {0}, {1}".format(who, when))
-                max_api.answer_callback(callback_id=callback_id, notification="Инцидент подтвержден")
-            else:
-                log("Ошибка при подтверждении инцидента, SIEM вернул код {0}".format(result))
-                max_api.answer_callback(callback_id=callback_id, notification="Не удалось подтвердить инцидент")
+        if action in ("apprv", "close"):
+            wanted_status = "Approved" if action == "apprv" else "Closed"
+            need_update = apply_incident_transition(callback_id=callback_id, incident_id=target,
+                                                    wanted_status=wanted_status, who=who, when=when)
+            if not need_update:
                 return
-            need_update = True
-        elif action == "close":
-            # закрыть инцидент
-            log("Попытка закрыть инцидент {inc} пользователем {user}".format(inc=target,
-                                                                            user=callback_user_id))
-            measures_text = "Инцидент закрыт через бот MAX."
-            message_text = "Инцидент закрыт пользователем {0}.".format(who)
-            result = siem_set_incident_status(incident_id=target,
-                                             status="Closed",
-                                             measures=measures_text,
-                                             message=message_text)
-            if result == 204:
-                log("Инцидент закрыт")
-                remember_incident_action(target, "⏹ Закрыл: {0}, {1}".format(who, when))
-                max_api.answer_callback(callback_id=callback_id, notification="Инцидент закрыт")
-            else:
-                log("Ошибка при закрытии инцидента: {0}".format(result))
-                max_api.answer_callback(callback_id=callback_id, notification="Не удалось закрыть инцидент")
-                return
-            need_update = True
         if action == "check" or need_update:
             # обновляем сообщение во всех чатах, куда уходил инцидент,
             # чтобы остальные сразу видели новый статус и кто его поменял

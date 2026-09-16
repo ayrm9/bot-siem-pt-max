@@ -38,6 +38,9 @@ STATE = {
     "transitions": [],
     "token_requests": 0,
     "incident_requests": 0,
+    # если больше нуля - столько следующих запросов инцидентов упадут с 503,
+    # это имитирует техработы или перегрузку SIEM
+    "fail_incidents": 0,
 }
 
 
@@ -184,10 +187,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             print("[siem:80] добавлен инцидент {0} ({1})".format(incident["key"], incident["id"]), flush=True)
             return self._reply(200, incident)
 
+        if path == "/_fail_incidents":
+            with LOCK:
+                STATE["fail_incidents"] = int(body.get("count", 1))
+            return self._reply(200, {"fail_incidents": STATE["fail_incidents"]})
+
         if path == "/_reset":
             with LOCK:
                 STATE.update({"incidents": [], "events": {}, "transitions": [],
-                              "token_requests": 0, "incident_requests": 0})
+                              "token_requests": 0, "incident_requests": 0,
+                              "fail_incidents": 0})
             return self._reply(200, {"ok": True})
 
         if not self._authorized():
@@ -196,6 +205,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/v2/incidents/":
             with LOCK:
                 STATE["incident_requests"] += 1
+                if STATE["fail_incidents"] > 0:
+                    STATE["fail_incidents"] -= 1
+                    print("[siem:80] имитирую сбой, осталось {0}".format(STATE["fail_incidents"]),
+                          flush=True)
+                    # ответ без поля incidents - именно на нем падала прежняя версия бота
+                    return self._reply(503, {"error": "Service Unavailable"})
             time_from = parse_ts(body.get("timeFrom"))
             with LOCK:
                 found = []

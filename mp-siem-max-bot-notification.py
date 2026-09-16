@@ -19,6 +19,12 @@ requests.packages.urllib3.disable_warnings()
 # Переопределение кол-ва попыток для запросов по URL
 requests.adapters.DEFAULT_RETRIES = 3
 
+# Настройки, появившиеся в новых версиях бота, читаются через getattr со значением
+# по умолчанию. Так обновление кода не ломает работу на settings.py от прежней версии:
+# файл с настройками правится руками и при git pull не обновляется.
+SIEM_TIMEOUT = getattr(settings, "siem_timeout", 60)
+INCIDENT_HISTORY_DAYS = getattr(settings, "incident_messages_keep_days", 30)
+
 # Служебные переменные
 bot_db_connect, bot_db_cursor = db.connection_init()  # инициализация подключения к БД бота
 bearer_token = None  # хранит полученный токен для связи с SIEM
@@ -57,9 +63,15 @@ def siem_get_bearer_token():
         **{"Content-Type": "application/x-www-form-urlencoded",
            "Authorization": "Bearer undefined"}
     }
-    response = requests.request("POST", url, data=payload, headers=headers, verify=False)
-
     global bearer_token, refresh_token, bearer_token_lifetime
+    try:
+        response = requests.request("POST", url, data=payload, headers=headers, verify=False,
+                                    timeout=SIEM_TIMEOUT)
+    except requests.exceptions.RequestException as ex_auth:
+        # недоступность SIEM - временная проблема, отличаем ее от неверного пароля
+        log("Не удалось обратиться к SIEM за токеном: {0}".format(ex_auth))
+        return None
+
     if 'invalid_username_or_password' in response.text:
         log("Auth error: invalid_username_or_password")
         return 0
@@ -69,7 +81,9 @@ def siem_get_bearer_token():
         bearer_token_lifetime = json_response["expires_in"]
         refresh_token = json_response["refresh_token"]
         log("Авторизация пройдена")
-    return bearer_token
+        return bearer_token
+    log("SIEM не выдал токен, код {0}: {1}".format(response.status_code, response.text[:300]))
+    return None
 
 
 # Получение списка инцидентов
@@ -116,11 +130,30 @@ def siem_get_incidents():
         **{"Content-Type": "application/json", "Authorization": "Bearer {0}".format(bearer_token)}
     }
 
-    response = requests.request("POST", url, json=payload, headers=headers, verify=False)
+    try:
+        response = requests.request("POST", url, json=payload, headers=headers, verify=False,
+                                    timeout=SIEM_TIMEOUT)
+    except requests.exceptions.RequestException as ex_incidents:
+        # сеть моргнула или SIEM недоступен - не повод останавливать бота
+        log("Не удалось запросить инциденты: {0}".format(ex_incidents))
+        return []
 
     if response.status_code == 401:
         return 401
-    return response.json()['incidents']
+    if response.status_code != 200:
+        # чаще всего это временная ошибка SIEM (500, 502, 503, техработы)
+        log("SIEM вернул код {0} при запросе инцидентов: {1}".format(
+            response.status_code, response.text[:300]))
+        return []
+    try:
+        body = response.json()
+    except ValueError:
+        log("SIEM вернул не JSON при запросе инцидентов: {0}".format(response.text[:300]))
+        return []
+    if not isinstance(body, dict) or "incidents" not in body:
+        log("В ответе SIEM нет поля incidents: {0}".format(str(body)[:300]))
+        return []
+    return body["incidents"]
 
 
 # Получить информацию по инциденту
@@ -130,11 +163,24 @@ def siem_get_incident_by_id(incident_id):
         **settings.default_header,
         **{"Content-Type": "application/json", "Authorization": "Bearer {0}".format(bearer_token)}
     }
-    response = requests.request("GET", url, headers=headers, verify=False)
+    try:
+        response = requests.request("GET", url, headers=headers, verify=False,
+                                    timeout=SIEM_TIMEOUT)
+    except requests.exceptions.RequestException as ex_incident:
+        log("Не удалось получить инцидент {0}: {1}".format(incident_id, ex_incident))
+        return None
 
     if response.status_code == 401:
         return 401
-    return response.json()
+    if response.status_code != 200:
+        log("SIEM вернул код {0} по инциденту {1}: {2}".format(
+            response.status_code, incident_id, response.text[:300]))
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        log("SIEM вернул не JSON по инциденту {0}: {1}".format(incident_id, response.text[:300]))
+        return None
 
 
 # Поиск событий по id инцидента
@@ -145,8 +191,23 @@ def siem_get_events_by_incident_id(incident_id):
         **settings.default_header,
         **{"Authorization": "Bearer {0}".format(bearer_token)}
     }
-    response = requests.request("GET", url, data=payload, headers=headers, verify=False)
-    return response.json()
+    try:
+        response = requests.request("GET", url, data=payload, headers=headers, verify=False,
+                                    timeout=SIEM_TIMEOUT)
+    except requests.exceptions.RequestException as ex_events:
+        log("Не удалось получить события инцидента {0}: {1}".format(incident_id, ex_events))
+        return []
+
+    if response.status_code != 200:
+        log("SIEM вернул код {0} по событиям инцидента {1}".format(response.status_code, incident_id))
+        return []
+    try:
+        events = response.json()
+    except ValueError:
+        log("SIEM вернул не JSON по событиям инцидента {0}".format(incident_id))
+        return []
+    # инцидент без событий отдается пустым списком, но подстрахуемся от другого типа
+    return events if isinstance(events, list) else []
 
 
 # Изменить статус инцидента
@@ -161,8 +222,13 @@ def siem_set_incident_status(incident_id, status, measures=None, message=None):
         **settings.default_header,
         **{"Authorization": "Bearer {0}".format(bearer_token)}
     }
-    log("Попытка изменить инцидент, payload: {0}; header: {1}".format(payload, headers))
-    response = requests.request(method="PUT", url=url, headers=headers, verify=False, json=payload)
+    log("Попытка изменить инцидент {0} на статус {1}".format(incident_id, status))
+    try:
+        response = requests.request(method="PUT", url=url, headers=headers, verify=False,
+                                    json=payload, timeout=SIEM_TIMEOUT)
+    except requests.exceptions.RequestException as ex_status:
+        log("Не удалось изменить статус инцидента {0}: {1}".format(incident_id, ex_status))
+        return None
     return response.status_code
 
 
@@ -212,11 +278,95 @@ def incident_to_string(incident):
                         f"Имя: {inc_name}\n" \
                         f"Статус: {inc_status}\n" \
                         f"Ссылка на инцидент: {inc_link}" \
+                        f"{incident_actions_block(inc_id)}" \
                         f"\n{events_str}"
         return result_string
     except Exception as ex_parse:
         log("Ошибка при парсинге инцидента: " + str(ex_parse))
         return "Не удалось распарсить инцидент"
+
+
+# Блок с историей действий через бота: кто подтвердил или закрыл инцидент
+def incident_actions_block(incident_id):
+    rows = db.select_with_values(bot_db_cursor, db_querys.incident_action_get, str(incident_id))
+    if not rows:
+        return ""
+    return "\n\nДействия через бота:\n" + "\n".join(row[0] for row in rows)
+
+
+# Запомнить действие пользователя над инцидентом
+def remember_incident_action(incident_id, text):
+    try:
+        db.execute_with_values(bot_db_connect, bot_db_cursor, db_querys.incident_action_insert,
+                               str(incident_id), text, datetime.now().isoformat())
+    except Exception as ex_action:
+        log("Не удалось сохранить действие по инциденту {0}: {1}".format(incident_id, ex_action))
+
+
+# Запомнить, в какой чат и каким сообщением ушел инцидент
+def remember_incident_message(incident_id, chat_id, message_id):
+    try:
+        db.execute_with_values(bot_db_connect, bot_db_cursor, db_querys.incident_message_insert,
+                               str(incident_id), chat_id, message_id, datetime.now().isoformat())
+    except Exception as ex_message:
+        log("Не удалось сохранить сообщение инцидента {0}: {1}".format(incident_id, ex_message))
+
+
+# Кому из чатов инцидент еще не отправлялся.
+# Защищает от дублей, если бота перезапустили между отправкой сообщения и
+# сохранением last_incident_time, и при этом дошлет тем, кому не успели отправить.
+def incident_pending_chats(incident_id, chat_ids):
+    delivered = {row[0] for row in get_incident_messages(incident_id)}
+    return [chat_id for chat_id in chat_ids if chat_id not in delivered], delivered
+
+
+# Все сообщения по инциденту: [(chat_id, message_id), ...]
+def get_incident_messages(incident_id):
+    try:
+        return db.select_with_values(bot_db_cursor, db_querys.incident_message_get, str(incident_id))
+    except Exception as ex_messages:
+        log("Не удалось получить сообщения инцидента {0}: {1}".format(incident_id, ex_messages))
+        return []
+
+
+# Удалить из БД записи о старых инцидентах, чтобы она не росла бесконечно
+def cleanup_incident_history():
+    border = (datetime.now() - timedelta(days=INCIDENT_HISTORY_DAYS)).isoformat()
+    try:
+        db.execute_with_values(bot_db_connect, bot_db_cursor, db_querys.incident_messages_cleanup, border)
+        db.execute_with_values(bot_db_connect, bot_db_cursor, db_querys.incident_actions_cleanup, border)
+        log("История инцидентов старше {0} дней очищена".format(INCIDENT_HISTORY_DAYS))
+    except Exception as ex_cleanup:
+        log("Не удалось очистить историю инцидентов: {0}".format(ex_cleanup))
+
+
+# Обновить сообщение об инциденте во всех чатах, куда он уходил
+def refresh_incident_messages(incident_id, extra_message_id=None):
+    """Перечитывает инцидент из SIEM и переписывает все его сообщения.
+
+    extra_message_id - сообщение, которого может не быть в БД (например, инцидент
+    отправлен старой версией бота): его тоже обновим, чтобы нажавший увидел результат.
+    """
+    incident = siem_get_incident_by_id(incident_id=incident_id)
+    if incident == 401 or not isinstance(incident, dict):
+        log("Не удалось перечитать инцидент {0} для обновления сообщений".format(incident_id))
+        return False
+
+    text = incident_to_string(incident) + "\n\nИнформация обновлена в " + \
+        datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    keyboard = generate_incident_keyboard(incident=incident)
+
+    message_ids = [row[1] for row in get_incident_messages(incident_id)]
+    if extra_message_id and extra_message_id not in message_ids:
+        message_ids.append(extra_message_id)
+    if not message_ids:
+        log("Нет сохраненных сообщений по инциденту {0}".format(incident_id))
+        return False
+
+    for message_id in message_ids:
+        max_api.edit_message(message_id=message_id, msg=text, attachments=keyboard)
+    log("Инцидент {0}: обновлено сообщений - {1}".format(incident_id, len(message_ids)))
+    return True
 
 
 # Генерация клавиатуры под инцидент
@@ -449,59 +599,59 @@ def handle_callback(update):
 
     if callback_chat_id in allowed_chats_ids or callback_user_id in allowed_chats_ids:
         need_update = False
+        # подпись действия видна всем получателям инцидента, поэтому пишем и имя, и id
+        who = "{username} ({userid})".format(username=callback_username, userid=callback_user_id)
+        when = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
         if action == "apprv":
             # подтвердить инцидент
             log("Попытка подтвердить инцидент {inc} пользователем {user}".format(inc=target,
                                                                                 user=callback_user_id))
             measures_text = "Инцидент подтвержден через бот MAX."
-            message_text = "Инцидент подтвержден пользователем " \
-                           "{username} ({userid}) через бот MAX.".format(username=callback_username,
-                                                                        userid=callback_user_id)
+            message_text = "Инцидент подтвержден пользователем {0} через бот MAX.".format(who)
             result = siem_set_incident_status(incident_id=target,
                                              status="Approved",
                                              measures=measures_text,
                                              message=message_text)
             if result == 204:
                 log("Инцидент подтвержден")
+                remember_incident_action(target, "▶️ Подтвердил: {0}, {1}".format(who, when))
                 max_api.answer_callback(callback_id=callback_id, notification="Инцидент подтвержден")
             else:
                 log("Ошибка при подтверждении инцидента, SIEM вернул код {0}".format(result))
                 max_api.answer_callback(callback_id=callback_id, notification="Не удалось подтвердить инцидент")
+                return
             need_update = True
         elif action == "close":
             # закрыть инцидент
             log("Попытка закрыть инцидент {inc} пользователем {user}".format(inc=target,
                                                                             user=callback_user_id))
             measures_text = "Инцидент закрыт через бот MAX."
-            message_text = "Инцидент закрыт пользователем " \
-                           "{username} ({userid}).".format(username=callback_username,
-                                                           userid=callback_user_id)
+            message_text = "Инцидент закрыт пользователем {0}.".format(who)
             result = siem_set_incident_status(incident_id=target,
                                              status="Closed",
                                              measures=measures_text,
                                              message=message_text)
             if result == 204:
                 log("Инцидент закрыт")
+                remember_incident_action(target, "⏹ Закрыл: {0}, {1}".format(who, when))
                 max_api.answer_callback(callback_id=callback_id, notification="Инцидент закрыт")
             else:
                 log("Ошибка при закрытии инцидента: {0}".format(result))
                 max_api.answer_callback(callback_id=callback_id, notification="Не удалось закрыть инцидент")
+                return
             need_update = True
         if action == "check" or need_update:
-            # обновить инфо об инциденте
-            incident = siem_get_incident_by_id(incident_id=target)
-            if incident == 401:
-                log("Не авторизован в SIEM, обновление информации об инциденте отложено")
-                max_api.answer_callback(callback_id=callback_id,
-                                        notification="Нет связи с SIEM, попробуйте позже")
-                return
-            incident_str = incident_to_string(incident)
-            text = incident_str + "\n\nИнформация обновлена в " + str(datetime.now())
-            keyboard = generate_incident_keyboard(incident=incident)
-            max_api.edit_message(message_id=callback_message_id, msg=text, attachments=keyboard)
-            log("В чате {0} обновлена информация об инциденте {1}".format(callback_chat_id, target))
+            # обновляем сообщение во всех чатах, куда уходил инцидент,
+            # чтобы остальные сразу видели новый статус и кто его поменял
+            updated = refresh_incident_messages(incident_id=target,
+                                                extra_message_id=callback_message_id)
             if action == "check":
-                max_api.answer_callback(callback_id=callback_id, notification="Обновлена информация об инциденте")
+                # на apprv и close ответ пользователю уже отправлен выше,
+                # второй ответ на тот же callback отправлять нельзя
+                max_api.answer_callback(
+                    callback_id=callback_id,
+                    notification="Обновлена информация об инциденте" if updated
+                    else "Нет связи с SIEM, попробуйте позже")
             return
 
     if callback_chat_id == settings.max_admin_chat_id:
@@ -626,9 +776,14 @@ if __name__ == "__main__":
     else:
         log("Бот MAX: {0} (id {1})".format(bot_info.get("name") or bot_info.get("first_name"),
                                            bot_info.get("user_id")))
+    # чистка старых записей о разосланных инцидентах
+    cleanup_incident_history()
     # отправка сообщения администратору
     max_api.send_message(msg="Бот запущен.")
     work = True
+    # текст последней ошибки, о которой уже сообщили администратору:
+    # нужен, чтобы не слать одно и то же сообщение каждые несколько секунд
+    reported_error = None
     while work:
         try:
             # Запрос списка инцидентов
@@ -637,20 +792,53 @@ if __name__ == "__main__":
             if incidents == 401:  # Unauthorised
                 log("Не авторизован в SIEM, авторизуюсь.")
                 # Авторизоваться повторно
-                if not siem_get_bearer_token():
-                    max_api.send_message(msg="Не удалось авторизоваться в SIEM: не правильный логин/пароль.")
-                    raise Exception("Не правильный логин/пароль")
+                token = siem_get_bearer_token()
+                if token == 0:
+                    # неверный логин или пароль сам не починится - сообщаем и ждем правки настроек
+                    if reported_error != "auth":
+                        max_api.send_message(msg="Не удалось авторизоваться в SIEM: "
+                                                 "неправильный логин или пароль. Инциденты не приходят.")
+                        reported_error = "auth"
+                    time.sleep(60)
+                elif not token:
+                    # SIEM недоступен - пробуем снова через паузу
+                    time.sleep(settings.pause_time)
                 continue
+            if reported_error:
+                # связь восстановилась - можно снова сообщать о проблемах
+                log("Работа восстановлена после ошибки: {0}".format(reported_error))
+                max_api.send_message(msg="Связь с SIEM восстановлена, бот продолжает работу.")
+                reported_error = None
             # Если новые инциденты найдены
             if len(incidents) > 0:
                 log("Найдены новые инциденты, пробую обработать их...")
                 try:
                     max_api.send_message(msg="Новые инциденты:", ids=allowed_chats_ids.get())
                     for inc in reversed(incidents):
-                        time.sleep(0.5)
-                        keyboard = generate_incident_keyboard(incident=inc)
-                        max_api.send_message(msg=incident_to_string(inc), ids=allowed_chats_ids.get(),
-                                             attachments=keyboard)
+                        targets, delivered = incident_pending_chats(inc["id"], allowed_chats_ids.get())
+                        if not targets:
+                            # бота перезапустили после отправки, но до сохранения отметки времени
+                            log("Инцидент {0} уже отправлялся ранее, пропускаю".format(inc.get("key")))
+                        else:
+                            if delivered:
+                                log("Инцидент {0} дошел не во все чаты, досылаю в {1}".format(
+                                    inc.get("key"), targets))
+                            time.sleep(0.5)
+                            keyboard = generate_incident_keyboard(incident=inc)
+                            # текст собираем один раз: внутри запрашиваются события инцидента
+                            incident_text = incident_to_string(inc)
+                            # отправляем чат за чатом и сразу отмечаем доставку в БД.
+                            # Если бота остановят посреди рассылки, при следующем запуске
+                            # инцидент дошлется только тем, кто его не получил
+                            for chat_index, chat_id in enumerate(targets):
+                                if chat_index:
+                                    # пауза между чатами ради антиспама MAX - после записи в БД,
+                                    # чтобы остановка бота в этот момент не привела к дублю
+                                    time.sleep(0.4)
+                                sent = max_api.send_message(msg=incident_text, ids=[chat_id],
+                                                            attachments=keyboard)
+                                if sent.get(chat_id):
+                                    remember_incident_message(inc["id"], chat_id, sent[chat_id])
                         # чтобы получить в следующий раз только новые инциденты, в переменную last_incident_time
                         # устанавливается время последнего найденного инцидента + 1 миллисекунда, чтобы исключить
                         # из проверки последний инцидент
@@ -670,6 +858,12 @@ if __name__ == "__main__":
                 time.sleep(settings.pause_time)
                 check_new_chats()
         except Exception as ex:
-            log(ex)
-            max_api.send_message(msg="Произошла непредвиденная ошибка, бот остановлен.\n{0}".format(ex))
-            raise
+            # разовая ошибка не должна останавливать бота: сообщаем один раз и продолжаем,
+            # иначе любая икота SIEM выключает оповещения до ручного перезапуска
+            log("Непредвиденная ошибка в основном цикле: {0}: {1}".format(type(ex).__name__, ex))
+            error_key = "{0}: {1}".format(type(ex).__name__, ex)
+            if reported_error != error_key:
+                max_api.send_message(msg="Произошла ошибка, бот продолжает работу и "
+                                         "попробует снова.\n{0}".format(error_key))
+                reported_error = error_key
+            time.sleep(settings.pause_time)

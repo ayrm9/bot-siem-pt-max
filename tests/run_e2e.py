@@ -26,10 +26,14 @@ SIEM_URL = "http://127.0.0.1"
 MAX_TOKEN = "TEST-MAX-TOKEN"
 ADMIN = 111
 USER = 777
+USER2 = 888  # второй получатель: на нем проверяем, что отметка о действии видна всем
 
 BOT_SCRIPT = "mp-siem-max-bot-notification.py"
 COPY_FILES = [BOT_SCRIPT, "max_api.py", "db.py", "db_querys.py", "pretty_log.py"]
 
+# Шаблон намеренно содержит только параметры первой версии бота: так тест заодно
+# проверяет, что новый код работает со старым settings.py, который пользователь
+# правил руками и который не обновляется через git pull.
 SETTINGS = '''
 from datetime import timedelta
 import urllib.parse
@@ -234,6 +238,13 @@ def main():
             "уведомление о доступе",
             lambda: find_message(max_state(), USER, "Администратор открыл доступ")) is not None)
 
+        # 3б. Второй получатель - нужен, чтобы проверить рассылку отметки о действии
+        print("\n3б. Администратор добавляет второй чат командой", flush=True)
+        inject(message_update("/accept {0}".format(USER2), ADMIN, ADMIN, first_name="Админ"))
+        check("второй чат добавлен в рассылку", wait_for(
+            "уведомление второму чату",
+            lambda: find_message(max_state(), USER2, "Администратор открыл доступ")) is not None)
+
         # 4. В SIEM появился инцидент - он должен уйти в разрешенный чат
         print("\n4. В SIEM создан инцидент", flush=True)
         incident = post(SIEM_URL + "/_add_incident",
@@ -286,9 +297,25 @@ def main():
         if edit:
             check("в обновленном тексте новый статус", "Статус: Approved" in edit[-1]["text"],
                   [line for line in edit[-1]["text"].splitlines() if line.startswith("Статус")])
+            check("в сообщении видно, кто подтвердил", "▶️ Подтвердил: @ivan" in edit[-1]["text"],
+                  [line for line in edit[-1]["text"].splitlines() if "Подтвердил" in line])
             payloads = [b["payload"] for b in buttons_of(edit[-1])]
             check("у подтвержденного инцидента осталась одна кнопка",
                   payloads == ["check:{0}".format(incident["id"])], str(payloads))
+
+        # отметку должны увидеть и те, кто кнопку не нажимал
+        message_user2 = find_message(max_state(), USER2, "INC-E2E-1")
+        check("инцидент уходил и во второй чат", message_user2 is not None)
+        if message_user2:
+            edit2 = wait_for("правка сообщения во втором чате",
+                             lambda: ([e for e in max_state()["edits"]
+                                       if e["message_id"] == message_user2["mid"]] or None))
+            check("во втором чате сообщение тоже обновлено", edit2 is not None)
+            if edit2:
+                check("второй чат видит, кто подтвердил",
+                      "▶️ Подтвердил: @ivan" in edit2[-1]["text"],
+                      [line for line in edit2[-1]["text"].splitlines() if "Подтвердил" in line])
+                check("второй чат видит новый статус", "Статус: Approved" in edit2[-1]["text"])
 
         # 6. Команды
         print("\n6. Команды бота", flush=True)
@@ -336,6 +363,20 @@ def main():
                                         if t["key"] == "INC-E2E-2"] or None))
             check("инцидент закрыт в SIEM", closed is not None and closed[0]["status"] == "Closed",
                   closed[0]["status"] if closed else "")
+
+        # 8б. SIEM отвечает ошибкой - бот обязан пережить это и восстановиться
+        print("\n8б. Сбой SIEM (503 без поля incidents)", flush=True)
+        post(SIEM_URL + "/_fail_incidents", {"count": 3})
+        requests_before = siem_state()["incident_requests"]
+        check("бот пережил ошибку SIEM и продолжает опрашивать", wait_for(
+            "опросы после сбоя",
+            lambda: siem_state()["incident_requests"] >= requests_before + 5, timeout=40) is not None)
+        check("процесс бота не упал", bot.poll() is None)
+        incident3 = post(SIEM_URL + "/_add_incident",
+                         {"key": "INC-E2E-3", "name": "После сбоя", "severity": "Low"})
+        check("после восстановления SIEM инциденты снова доставляются", wait_for(
+            "инцидент после сбоя",
+            lambda: find_message(max_state(), USER, "INC-E2E-3"), timeout=40) is not None)
 
         # 9. Перезапуск: состояние живет в БД, повторной рассылки быть не должно
         print("\n9. Перезапуск бота", flush=True)

@@ -84,18 +84,13 @@ def check_tables(cursor):
     cursor.execute(db_querys.tables_list)
     answer = cursor.fetchall()
     log("Проверка БД бота...")
-    goal = 0
+    missing = [table for table in db_querys.tables_required if (table,) not in answer]
     for table in db_querys.tables_required:
-        if (table,) in answer:
-            log("+ таблица {0} существует".format(table))
-            goal += 1
-        else:
-            log("- таблица {0} отсутствует в БД".format(table))
-    if goal == len(db_querys.tables_required):
-        log("БД бота готова к работе")
-    else:
-        raise Exception("База данных бота повреждена. Удалите файл {0} "
-                        "или восстановите его вручную.".format(settings.dbFileName))
+        log("{0} таблица {1}".format("-" if table in missing else "+", table))
+    if missing:
+        raise Exception("В базе данных бота не хватает таблиц: {0}. Удалите файл {1} "
+                        "или восстановите его вручную.".format(", ".join(missing), settings.dbFileName))
+    log("БД бота готова к работе")
 
 
 # Создать коннектор и курсор для обращения к БД
@@ -104,14 +99,13 @@ def connection_init():
         log("Файл с БД бота не найден")
         # создание пустого файла
         open(settings.dbFileName, "w").close()
-        db_connect = sqlite3.connect(settings.dbFileName)
-        db_cursor = db_connect.cursor()
-        db_cursor.executescript(db_querys.tables_create)
-        db_connect.commit()
-        db_cursor.close()
         log("Файл с БД бота создан")
     db_connect = sqlite3.connect(settings.dbFileName)
     db_cursor = db_connect.cursor()
+    # скрипт создает только недостающие таблицы, поэтому безопасен и для уже существующей БД:
+    # так в нее доезжают таблицы, появившиеся в новых версиях бота
+    db_cursor.executescript(db_querys.tables_create)
+    db_connect.commit()
     check_tables(db_cursor)
     return db_connect, db_cursor
 
@@ -138,6 +132,14 @@ def get_many(cursor: sqlite3.Cursor, query: str):
     except IndexError:
         log("Непредвиденная иерархия в ответе от БД: {0}".format(response))
         return response
+
+
+# Получить строки целиком (несколько колонок) с подстановкой значений
+def select_with_values(cursor: sqlite3.Cursor, query: str, *variables):
+    cursor.execute(query, variables)
+    result = cursor.fetchall()
+    log("db.select_with_values: \nquery - {0} {1}. \nrows - {2}".format(query, variables, len(result)))
+    return result
 
 
 # Выполнить запрос с подстановкой значений (вставка, обновление, удаление)

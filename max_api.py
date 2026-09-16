@@ -119,7 +119,12 @@ def send_message(msg, ids=None, attachments=None, parse_mode=None, max_retries=3
     if ids is None:
         ids = [settings.max_admin_chat_id]
     sent = {}
-    for chat_id in ids:
+    for index, chat_id in enumerate(ids):
+        # Пауза между чатами, чтобы не упереться в антиспам MAX.
+        # Стоит ДО отправки, а не после: иначе вызывающий код ждет ее, прежде чем
+        # получить message_id, и не успевает записать факт отправки, если бота остановят.
+        if index:
+            time.sleep(0.4)
         body = {
             "text": msg[:settings.max_message_length],
             "notify": notify,
@@ -141,8 +146,6 @@ def send_message(msg, ids=None, attachments=None, parse_mode=None, max_retries=3
                     message_id = response.get("message", {}).get("body", {}).get("mid")
                 sent[chat_id] = message_id
                 log("В чат {0} отправлено сообщение: {1}".format(chat_id, msg).replace("\n", " \\ "))
-                # Задержка нужна, чтобы не выйти за ограничения MAX (антиспам)
-                time.sleep(0.4)
                 break
             if status is None and attempt < max_retries - 1:
                 # сетевая ошибка - пробуем еще раз

@@ -353,7 +353,10 @@ def incident_to_string(incident):
             text = "{header}{details}{actions}{events}\n\n{link}".format(
                 header=header, details=details, actions=actions,
                 events=events_block(events, incident_day, max_items), link=link)
-            if len(text) <= settings.max_message_length:
+            # MAX считает лимит длины сообщения в байтах UTF-8, а не в символах: кириллица
+            # занимает 2 байта на символ, поэтому сравнивать нужно по байтам - иначе можно
+            # прислать текст, который MAX отклонит целиком с 400 proto.payload
+            if len(text.encode("utf-8")) <= settings.max_message_length:
                 return text
         return text
     except Exception as ex_parse:
@@ -708,10 +711,13 @@ def handle_message(message):
                                      ids=[chat_id])
     elif command == "/debug":
         if is_admin:
+            # свежие записи первыми: если сообщение придется обрезать по лимиту MAX,
+            # должны уцелеть последние события, а не самые старые из буфера
+            recent_logs = "\n".join(reversed(logger.list + max_api.logger.list))
             msg = f"last_incident_time = {last_incident_time.get()}\n" \
                   f"last_marker = {last_marker.get()}\n" \
                   f"chat_ids = {allowed_chats_ids.get()}\n" \
-                  f"Последние логи: \n{logger}\n{max_api.logger}"
+                  f"Последние логи (сначала новые):\n{recent_logs}"
             max_api.send_message(msg=msg)
     return None
 

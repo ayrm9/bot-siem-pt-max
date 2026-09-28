@@ -38,6 +38,23 @@ def _params(extra=None):
     return params
 
 
+def _truncate(text, max_bytes):
+    """Обрезать текст так, чтобы его UTF-8 представление не превышало max_bytes.
+
+    MAX считает лимит длины текста в байтах, а не в символах (settings.max_message_length -
+    это тоже байты). Кириллица занимает 2 байта на символ, поэтому обрезка по символам
+    (text[:max_bytes]) может дать текст, который в байтах длиннее лимита, и MAX отклонит
+    сообщение целиком с 400 proto.payload.
+    """
+    if text is None:
+        return text
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    # errors="ignore" отбрасывает обрубленные байты многобайтового символа на границе среза
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def _headers():
     # MAX ждет токен в заголовке Authorization БЕЗ префикса Bearer.
     # С префиксом сервер считает токеном всю строку и отвечает "Malformed access token".
@@ -126,7 +143,7 @@ def send_message(msg, ids=None, attachments=None, parse_mode=None, max_retries=3
         if index:
             time.sleep(0.4)
         body = {
-            "text": msg[:settings.max_message_length],
+            "text": _truncate(msg, settings.max_message_length),
             "notify": notify,
         }
         if attachments is not None:
@@ -163,7 +180,7 @@ def edit_message(message_id, msg, attachments=None, parse_mode=None):
 
     Вложения при редактировании нужно передавать заново, иначе клавиатура пропадет.
     """
-    body = {"text": msg[:settings.max_message_length]}
+    body = {"text": _truncate(msg, settings.max_message_length)}
     if attachments is not None:
         body["attachments"] = attachments
     if parse_mode is not None:

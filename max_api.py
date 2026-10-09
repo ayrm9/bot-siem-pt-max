@@ -180,7 +180,9 @@ def edit_message(message_id, msg, attachments=None, parse_mode=None):
 
     Вложения при редактировании нужно передавать заново, иначе клавиатура пропадет.
     """
-    body = {"text": _truncate(msg, settings.max_message_length)}
+    # notify=False: правка не должна присылать пуш. В MAX по умолчанию notify=true,
+    # и каждое обновление сообщения (кто-то подтвердил/закрыл инцидент) уведомляло всех.
+    body = {"text": _truncate(msg, settings.max_message_length), "notify": False}
     if attachments is not None:
         body["attachments"] = attachments
     if parse_mode is not None:

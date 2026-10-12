@@ -25,6 +25,9 @@ requests.adapters.DEFAULT_RETRIES = 3
 SIEM_TIMEOUT = getattr(settings, "siem_timeout", 60)
 INCIDENT_HISTORY_DAYS = getattr(settings, "incident_messages_keep_days", 30)
 MAX_EVENT_LENGTH = getattr(settings, "max_event_length", 400)
+# Обновлять карточку инцидента во всех чатах или только у нажавшего кнопку.
+# MAX присылает пуш на каждую правку сообщения, даже с notify=false, поэтому по умолчанию выключено.
+UPDATE_ALL_CHATS = getattr(settings, "incident_update_all_chats", False)
 
 # Режим разметки MAX. html выбран вместо markdown потому, что экранирование в нем
 # однозначное: достаточно заменить &, < и >. В описаниях событий SIEM часто
@@ -482,12 +485,12 @@ def apply_incident_transition(callback_id, incident_id, wanted_status, who, when
     return True
 
 
-# Обновить сообщение об инциденте во всех чатах, куда он уходил
+# Обновить сообщение об инциденте у нажавшего, а при UPDATE_ALL_CHATS - во всех чатах
 def refresh_incident_messages(incident_id, extra_message_id=None):
-    """Перечитывает инцидент из SIEM и переписывает все его сообщения.
+    """Перечитывает инцидент из SIEM и переписывает его сообщения.
 
-    extra_message_id - сообщение, которого может не быть в БД (например, инцидент
-    отправлен старой версией бота): его тоже обновим, чтобы нажавший увидел результат.
+    extra_message_id - сообщение, на котором нажали кнопку. Обновляется всегда, даже если
+    его нет в БД (например, инцидент отправлен старой версией бота).
     """
     incident = siem_get_incident_by_id(incident_id=incident_id)
     if incident == 401 or not isinstance(incident, dict):
@@ -498,7 +501,7 @@ def refresh_incident_messages(incident_id, extra_message_id=None):
         datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     keyboard = generate_incident_keyboard(incident=incident)
 
-    message_ids = [row[1] for row in get_incident_messages(incident_id)]
+    message_ids = [row[1] for row in get_incident_messages(incident_id)] if UPDATE_ALL_CHATS else []
     if extra_message_id and extra_message_id not in message_ids:
         message_ids.append(extra_message_id)
     if not message_ids:
@@ -753,8 +756,8 @@ def handle_callback(update):
             if not need_update:
                 return
         if action == "check" or need_update:
-            # обновляем сообщение во всех чатах, куда уходил инцидент,
-            # чтобы остальные сразу видели новый статус и кто его поменял
+            # обновляем сообщение нажавшего, а при UPDATE_ALL_CHATS - и у остальных,
+            # чтобы они сразу видели новый статус и кто его поменял
             updated = refresh_incident_messages(incident_id=target,
                                                 extra_message_id=callback_message_id)
             if action == "check":

@@ -343,27 +343,14 @@ def main():
             check("у подтвержденного инцидента осталась одна кнопка",
                   payloads == ["check:{0}".format(incident["id"])], str(payloads))
 
-        # отметку должны увидеть и те, кто кнопку не нажимал
+        # чужие карточки не трогаем: MAX присылает пуш на каждую правку сообщения
         message_user2 = find_message(max_state(), USER2, "INC-E2E-1")
         check("инцидент уходил и во второй чат", message_user2 is not None)
         if message_user2:
-            edit2 = wait_for("правка сообщения во втором чате",
-                             lambda: ([e for e in max_state()["edits"]
-                                       if e["message_id"] == message_user2["mid"]] or None))
-            check("во втором чате сообщение тоже обновлено", edit2 is not None)
-            if edit2:
-                check("второй чат видит, кто подтвердил",
-                      "▶️ Подтвердил: @ivan" in edit2[-1]["text"],
-                      [line for line in edit2[-1]["text"].splitlines() if "Подтвердил" in line])
-                check("второй чат видит новый статус", "· Подтвержден" in edit2[-1]["text"])
-                # у остальных дежурных кнопки действий должны пропасть,
-                # чтобы никто не пытался подтвердить или закрыть повторно
-                payloads2 = [b["payload"] for b in buttons_of(edit2[-1])]
-                check("во втором чате кнопки Подтвердить и Закрыть исчезли",
-                      payloads2 == ["check:{0}".format(incident["id"])], str(payloads2))
-                texts2 = [b["text"] for b in buttons_of(edit2[-1])]
-                check("во втором чате осталась только кнопка обновления",
-                      all("Подтвердить" not in t and "Закрыть" not in t for t in texts2), str(texts2))
+            time.sleep(2)
+            edits2 = [e for e in max_state()["edits"] if e["message_id"] == message_user2["mid"]]
+            check("сообщение во втором чате не правится (нет лишних пушей)", not edits2,
+                  "правок: {0}".format(len(edits2)))
 
         # 5б. Второй дежурный нажимает кнопку по уже подтвержденному инциденту.
         # Так бывает, если он успел нажать до того, как у него перерисовалось сообщение.

@@ -423,6 +423,9 @@ def main():
         if message2:
             check("средняя опасность отмечена оранжевым", message2["text"].startswith("🟠 <b>"),
                   message2["text"].splitlines()[0])
+            # SIEM под нагрузкой отдает старый статус на чтение - карточка все равно
+            # должна сразу стать закрытой, иначе кнопка «Закрыть» остается и ее жмут снова
+            post(SIEM_URL + "/_stale_reads", {"enabled": True})
             inject(callback_update("close:{0}".format(incident2["id"]), USER, USER,
                                    message2["mid"], username="ivan", first_name="Иван"))
             closed = wait_for("закрытие инцидента",
@@ -430,6 +433,36 @@ def main():
                                         if t["key"] == "INC-E2E-2"] or None))
             check("инцидент закрыт в SIEM", closed is not None and closed[0]["status"] == "Closed",
                   closed[0]["status"] if closed else "")
+            edit_closed = wait_for("правка закрытого инцидента",
+                                   lambda: ([e for e in max_state()["edits"]
+                                             if e["message_id"] == message2["mid"]] or None))
+            check("карточка закрыта, хотя SIEM еще отдает старый статус",
+                  edit_closed is not None and "· Закрыт" in edit_closed[-1]["text"]
+                  and [b["payload"] for b in buttons_of(edit_closed[-1])]
+                  == ["check:{0}".format(incident2["id"])],
+                  edit_closed[-1]["text"].splitlines()[1] if edit_closed else "")
+
+            answers_before = len(max_state()["answers"])
+            inject(callback_update("close:{0}".format(incident2["id"]), USER, USER,
+                                   message2["mid"], username="ivan", first_name="Иван"))
+            again = wait_for("ответ на повторное закрытие",
+                             lambda: ([a for a in max_state()["answers"][answers_before:]
+                                       if (a["notification"] or "").startswith("Инцидент уже закрыт")]
+                                      or None))
+            check("повторное нажатие сразу отвечает «уже закрыт»", again is not None)
+            check("повторное нажатие не уходит в SIEM",
+                  len([t for t in siem_state()["transitions"] if t["key"] == "INC-E2E-2"]) == 1)
+
+            edits_before = len(max_state()["edits"])
+            inject(callback_update("check:{0}".format(incident2["id"]), USER, USER,
+                                   message2["mid"], username="ivan", first_name="Иван"))
+            refreshed = wait_for("обновление закрытого инцидента",
+                                 lambda: ([e for e in max_state()["edits"][edits_before:]
+                                           if e["message_id"] == message2["mid"]] or None))
+            check("«Обновить» не возвращает кнопку «Закрыть»",
+                  refreshed is not None and "· Закрыт" in refreshed[-1]["text"],
+                  refreshed[-1]["text"].splitlines()[1] if refreshed else "")
+            post(SIEM_URL + "/_stale_reads", {"enabled": False})
 
         # 8б. SIEM отвечает ошибкой - бот обязан пережить это и восстановиться
         print("\n8б. Сбой SIEM (503 без поля incidents)", flush=True)
@@ -475,6 +508,44 @@ def main():
             "бан после перезапуска",
             lambda: [m for m in messages_to(max_state(), ADMIN)
                      if "Список заблокированных чатов: [999]" in (m["text"] or "")]) is not None)
+
+        # 9б. Режим «обновлять карточку у всех, кроме тихих чатов»: остальные видят,
+        # что инцидент закрыт, а в тихом чате правок (и пушей MAX) нет
+        print("\n9б. Обновление у всех, кроме тихих чатов", flush=True)
+        with open(os.path.join(workdir, "settings.py"), "a", encoding="utf-8") as handle:
+            handle.write("\nincident_update_all_chats = True\nincident_quiet_chat_ids = [{0}]\n".format(USER))
+        bot.terminate()
+        bot.wait(timeout=10)
+        processes.remove(bot)
+        bot = subprocess.Popen([sys.executable, BOT_SCRIPT], cwd=workdir,
+                               stdout=bot_log, stderr=subprocess.STDOUT)
+        processes.append(bot)
+        for key, presser in (("INC-E2E-Q1", USER), ("INC-E2E-Q2", USER2)):
+            inc = post(SIEM_URL + "/_add_incident", {"key": key, "name": "Тихий режим"})
+            got = wait_for("инцидент " + key, lambda: (find_message(max_state(), USER, key) and
+                                                        find_message(max_state(), USER2, key)))
+            if not check(key + " доставлен в оба чата", got is not None):
+                continue
+            mine = find_message(max_state(), presser, key)
+            other_chat = USER2 if presser == USER else USER
+            other = find_message(max_state(), other_chat, key)
+            inject(callback_update("close:{0}".format(inc["id"]), presser, presser, mine["mid"]))
+            own_edit = wait_for("правка у нажавшего",
+                                lambda: [e for e in max_state()["edits"] if e["message_id"] == mine["mid"]]
+                                or None)
+            check(key + ": у нажавшего карточка закрыта",
+                  own_edit is not None and "· Закрыт" in own_edit[-1]["text"]
+                  and own_edit[-1]["text"].count("Закрыл") == 1)
+            time.sleep(2)
+            other_edits = [e for e in max_state()["edits"] if e["message_id"] == other["mid"]]
+            if other_chat == USER:
+                check(key + ": в тихом чате карточка не правится", not other_edits,
+                      "правок: {0}".format(len(other_edits)))
+            else:
+                check(key + ": другой чат видит, что закрыто, и кнопки пропали",
+                      other_edits and "· Закрыт" in other_edits[-1]["text"]
+                      and [b["payload"] for b in buttons_of(other_edits[-1])]
+                      == ["check:{0}".format(inc["id"])])
 
         # 10. Токен MAX проверяется через заголовок Authorization без префикса Bearer
         print("\n10. Авторизация в MAX", flush=True)

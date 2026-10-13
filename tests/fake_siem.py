@@ -198,6 +198,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 STATE["fail_incidents"] = int(body.get("count", 1))
             return self._reply(200, {"fail_incidents": STATE["fail_incidents"]})
 
+        if path == "/_stale_reads":
+            # настоящий SIEM отдает новый статус на чтение с задержкой: имитируем это,
+            # не меняя статус, видимый через incidentsReadModel
+            with LOCK:
+                STATE["stale_reads"] = bool(body.get("enabled"))
+            return self._reply(200, {"stale_reads": STATE["stale_reads"]})
+
         if path == "/_reset":
             with LOCK:
                 STATE.update({"incidents": [], "events": {}, "transitions": [],
@@ -249,7 +256,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._reply(400, {"error": "invalid transition",
                                          "status": incident["status"]})
             with LOCK:
-                incident["status"] = body.get("id")
+                if not STATE.get("stale_reads"):
+                    incident["status"] = body.get("id")
                 STATE["transitions"].append({
                     "incident_id": incident["id"],
                     "key": incident["key"],

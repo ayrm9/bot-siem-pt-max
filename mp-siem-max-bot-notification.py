@@ -28,6 +28,9 @@ MAX_EVENT_LENGTH = getattr(settings, "max_event_length", 400)
 # Обновлять карточку инцидента во всех чатах или только у нажавшего кнопку.
 # MAX присылает пуш на каждую правку сообщения, даже с notify=false, поэтому по умолчанию выключено.
 UPDATE_ALL_CHATS = getattr(settings, "incident_update_all_chats", False)
+# Чаты, где карточку не обновляют по чужим нажатиям (при UPDATE_ALL_CHATS): у кого MAX
+# присылает пуш на каждую правку. Нажать кнопку там можно - бот ответит «уже закрыт».
+QUIET_CHAT_IDS = set(getattr(settings, "incident_quiet_chat_ids", []))
 
 # Режим разметки MAX. html выбран вместо markdown потому, что экранирование в нем
 # однозначное: достаточно заменить &, < и >. В описаниях событий SIEM часто
@@ -372,8 +375,16 @@ def incident_actions_block(incident_id):
     rows = db.select_with_values(bot_db_cursor, db_querys.incident_action_get, str(incident_id))
     if not rows:
         return ""
-    # в записи попадает имя пользователя из MAX, поэтому экранируем при выводе
-    return "\n\n<b>Действия через бота:</b>\n" + "\n".join(html_escape(row[0]) for row in rows)
+    # Каждое действие показываем один раз - первое. Повторы могли попасть в БД
+    # от старых версий бота, когда кнопку жали несколько раз.
+    shown, lines = set(), []
+    for row in rows:
+        kind = row[0].split(":", 1)[0]
+        if kind not in shown:
+            shown.add(kind)
+            # в записи попадает имя пользователя из MAX, поэтому экранируем при выводе
+            lines.append(html_escape(row[0]))
+    return "\n\n<b>Действия через бота:</b>\n" + "\n".join(lines)
 
 
 # Запомнить действие пользователя над инцидентом
@@ -440,10 +451,34 @@ STATUS_WORDS = {
 }
 
 
+# Кто первым перевел инцидент в этот статус через бота: "@ivan (777), 16.09.2026 15:20" или None
+def incident_actor_for_status(incident_id, wanted_status):
+    emoji = STATUS_WORDS[wanted_status][0]
+    rows = db.select_with_values(bot_db_cursor, db_querys.incident_action_get, str(incident_id))
+    for row in rows or []:
+        if row[0].startswith(emoji):
+            _, separator, actor = row[0].partition(": ")
+            return actor if separator else ""
+    return None
+
+
 # Сменить статус инцидента по нажатию кнопки и ответить нажавшему.
-# Возвращает True, если сообщения об инциденте нужно обновить.
+# Возвращает (нужно ли обновить сообщение, статус для отрисовки или None - взять из SIEM).
 def apply_incident_transition(callback_id, incident_id, wanted_status, who, when):
     emoji, verb_past, verb_done, verb_do = STATUS_WORDS[wanted_status]
+
+    # Повторное нажатие (в том числе накопившееся, пока бот был недоступен) не гоняем в SIEM:
+    # там переход занимает секунды, и очередь нажатий разбиралась бы минутами
+    actor = incident_actor_for_status(incident_id, wanted_status)
+    if actor is not None:
+        notification = "Инцидент уже {0}".format(verb_done)
+        if actor:
+            notification += ": {0}".format(actor)
+        log("Инцидент {0} уже {1} через бота, повторное нажатие от {2}".format(
+            incident_id, verb_done, who))
+        max_api.answer_callback(callback_id=callback_id, notification=notification)
+        return True, wanted_status
+
     log("Попытка перевести инцидент {0} в статус {1} пользователем {2}".format(
         incident_id, wanted_status, who))
 
@@ -457,7 +492,9 @@ def apply_incident_transition(callback_id, incident_id, wanted_status, who, when
         remember_incident_action(incident_id, "{0} {1}: {2}, {3}".format(emoji, verb_past, who, when))
         max_api.answer_callback(callback_id=callback_id,
                                 notification="Инцидент {0}".format(verb_done))
-        return True
+        # SIEM отдает новый статус на чтение с задержкой (под нагрузкой - десятки секунд),
+        # поэтому рисуем карточку сразу с новым статусом, иначе кнопки не пропадут
+        return True, wanted_status
 
     # SIEM отказал - выясняем причину по фактическому статусу инцидента,
     # а не по тексту ошибки: он различается между версиями SIEM
@@ -466,7 +503,7 @@ def apply_incident_transition(callback_id, incident_id, wanted_status, who, when
     if not isinstance(incident, dict):
         max_api.answer_callback(callback_id=callback_id,
                                 notification="Нет связи с SIEM, попробуйте позже")
-        return False
+        return False, None
 
     current_status = incident.get("status")
     if current_status == wanted_status:
@@ -477,31 +514,39 @@ def apply_incident_transition(callback_id, incident_id, wanted_status, who, when
             notification += ": {0}".format(actor)
         log("Инцидент {0} уже был {1} ранее".format(incident_id, verb_done))
         max_api.answer_callback(callback_id=callback_id, notification=notification)
-        return True
+        return True, None
 
     max_api.answer_callback(
         callback_id=callback_id,
         notification="Не удалось {0}. Статус инцидента в SIEM: {1}".format(verb_do, current_status))
-    return True
+    return True, None
 
 
 # Обновить сообщение об инциденте у нажавшего, а при UPDATE_ALL_CHATS - во всех чатах
-def refresh_incident_messages(incident_id, extra_message_id=None):
+def refresh_incident_messages(incident_id, extra_message_id=None, status=None):
     """Перечитывает инцидент из SIEM и переписывает его сообщения.
 
     extra_message_id - сообщение, на котором нажали кнопку. Обновляется всегда, даже если
     его нет в БД (например, инцидент отправлен старой версией бота).
+    status - статус для отрисовки вместо прочитанного из SIEM (он обновляется с задержкой).
     """
     incident = siem_get_incident_by_id(incident_id=incident_id)
     if incident == 401 or not isinstance(incident, dict):
         log("Не удалось перечитать инцидент {0} для обновления сообщений".format(incident_id))
         return False
+    if not status and incident.get("status") == "New":
+        # SIEM еще не успел отдать на чтение статус, который поставили через бота
+        status = next((st for st in ("Closed", "Approved")
+                       if incident_actor_for_status(incident_id, st) is not None), None)
+    if status:
+        incident = dict(incident, status=status)
 
     text = incident_to_string(incident) + "\n\nИнформация обновлена в " + \
         datetime.now().strftime("%Y.%m.%d %H:%M:%S")
     keyboard = generate_incident_keyboard(incident=incident)
 
-    message_ids = [row[1] for row in get_incident_messages(incident_id)] if UPDATE_ALL_CHATS else []
+    message_ids = [message_id for chat_id, message_id in get_incident_messages(incident_id)
+                   if chat_id not in QUIET_CHAT_IDS] if UPDATE_ALL_CHATS else []
     if extra_message_id and extra_message_id not in message_ids:
         message_ids.append(extra_message_id)
     if not message_ids:
@@ -745,21 +790,23 @@ def handle_callback(update):
     action, _, target = callback_data.partition(':')
 
     if callback_chat_id in allowed_chats_ids or callback_user_id in allowed_chats_ids:
-        need_update = False
+        need_update, status = False, None
         # подпись действия видна всем получателям инцидента, поэтому пишем и имя, и id
         who = "{username} ({userid})".format(username=callback_username, userid=callback_user_id)
         when = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
         if action in ("apprv", "close"):
             wanted_status = "Approved" if action == "apprv" else "Closed"
-            need_update = apply_incident_transition(callback_id=callback_id, incident_id=target,
-                                                    wanted_status=wanted_status, who=who, when=when)
+            need_update, status = apply_incident_transition(
+                callback_id=callback_id, incident_id=target,
+                wanted_status=wanted_status, who=who, when=when)
             if not need_update:
                 return
         if action == "check" or need_update:
             # обновляем сообщение нажавшего, а при UPDATE_ALL_CHATS - и у остальных,
             # чтобы они сразу видели новый статус и кто его поменял
             updated = refresh_incident_messages(incident_id=target,
-                                                extra_message_id=callback_message_id)
+                                                extra_message_id=callback_message_id,
+                                                status=status)
             if action == "check":
                 # на apprv и close ответ пользователю уже отправлен выше,
                 # второй ответ на тот же callback отправлять нельзя
